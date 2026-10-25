@@ -832,6 +832,9 @@ connected after it.
 
 ### Join and bind
 
+For a step-by-step walkthrough with copy-paste commands, see
+[docs/setup.md](../docs/setup.md).
+
 - Member: save the invite code from the owner in a private file, then run
   `/team-messaging:join`. It runs
   `team-messaging join <url> - --name <name> --client claude-plugin < <file>`,

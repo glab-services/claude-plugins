@@ -8,6 +8,8 @@ agent sessions, a channel MCP server with hooks and a CLI, and the
   retention and operations.
 - [channel/README.md](channel/README.md): the channel MCP server, hooks, CLI and
   the plugin.
+- [docs/setup.md](docs/setup.md): step-by-step setup: the first identity,
+  workspaces, topics, invites, joining and switching a bound plugin.
 
 ## Install the plugin
 
