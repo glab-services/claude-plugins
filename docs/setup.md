@@ -11,6 +11,27 @@ The example broker is `https://broker.example.com`. Replace it with your own,
 and use exactly the same URL string everywhere (see
 [the credential file name](#the-credential-file-name-hashes-the-broker-url)).
 
+**The plugin works in the one workspace it is bound to.** Its tools act only
+in that workspace (and topic), because every call carries it
+(`channel/channel.mjs:78`). `create_workspace` is the one exception: it
+creates another workspace but does not move the binding
+(`channel/server.mjs:129-134`). `workspaces` lists your memberships
+everywhere but changes nothing (`:137`). To work in a workspace the plugin is
+not bound to, use the scripts in `scripts/ops/` or rebind the plugin
+([section 6](#6-switch-a-plugin-that-is-already-bound)).
+
+The scripts in `scripts/ops` read `TM_URL`, `TM_TOKENS`, `TM_SESSION`,
+`TM_WORKSPACE` and `TM_TOPIC` from your shell. The plugin takes its binding
+from the plugin options instead: `plugin/.mcp.json` sets the MCP server's
+`TM_*` values from those options. The hooks, however, read
+`CLAUDE_PLUGIN_OPTION_<KEY>` first and fall back to `TM_<KEY>` when that
+variable is absent (`channel/plugin-env.mjs:10`). A hook test shows that a
+workspace-level binding whose `CLAUDE_PLUGIN_OPTION_TOPIC` is absent sends
+the exported `TM_TOPIC` (`channel/test/plugin-session-start.test.mjs`).
+Whether Claude Code leaves an empty option unset or exports it as `""` is
+**UNVERIFIED**. So an exported `TM_WORKSPACE` or `TM_TOPIC` can reach the
+hooks: unset them in the shell you start Claude Code from.
+
 ## 1. Prerequisites
 
 - A running broker. See [broker/README.md](../broker/README.md#run): it needs
@@ -146,7 +167,7 @@ configuration. The credential lives at
 
 `join` from the CLI cannot do this for a token-file user, because it only
 reuses a credential saved under `~/.config/team-messaging/credentials`
-(`channel/cli.mjs:80-83`). Use the static helper. It sends the code from a
+(`channel/cli.mjs:116-120`). Use the static helper. It sends the code from a
 0600 body file and deletes the code file only after HTTP 201. After a network
 error, a 4xx or a 429 it keeps the file, so you can retry with the same code:
 
@@ -193,7 +214,13 @@ A static owner uses `static:admin` the same way.
 
 `/team-messaging:bind` reuses a saved credential. A token-file user has none,
 so the plugin owner must be a minted identity like `alice`
-(`channel/cli.mjs:125`, `CREDENTIAL_MISSING`).
+(`channel/cli.mjs:162`, `CREDENTIAL_MISSING`).
+
+The plugin's tools act only in the workspace it is bound to.
+`create_workspace` is the one exception, and it does not move the binding:
+after step 1 the tools still act in the old workspace until step 2 binds the
+new one and Claude Code restarts. To work in an unbound workspace, use the
+terminal commands above or rebind.
 
 1. If the plugin's MCP tools are not loaded yet, create the workspace from the
    terminal as above. Otherwise the skill calls `create_workspace`.
@@ -229,19 +256,32 @@ scripts/ops/tm-invite.sh "file:$cred" dev "$HOME/bob-myproject-dev.code"
 
 ## 5. A member joins (`bob`)
 
-**Check the plugin binding first.** `join` redeems the invite
-(`channel/cli.mjs:83`) before it writes the plugin binding (`:106`). If the
-plugin is already bound to another workspace, topic or broker, the invite is
-used up and the join then reports `conflict`. Run `/team-messaging:status`
-first:
+**`join` checks the plugin binding first.** From plugin version 0.9.4,
+`join --client claude-plugin` reads the plugin options before it redeems the
+invite (`channel/cli.mjs:70-100`, called at `:118`). It stops with an error on
+stderr, and the invite stays unused, in two cases:
 
-- `PLUGIN_NOT_CONFIGURED`: the plugin is unbound, so go ahead.
-- A state with another workspace or topic: reset the plugin as in
-  [section 6](#6-switch-a-plugin-that-is-already-bound) **before** you join.
+- `PLUGIN_NOT_READY`: the plugin is not installed, or its options cannot be
+  read. Install the plugin or fix its configuration, then join again.
+- `PLUGIN_ALREADY_BOUND`: the plugin holds a saved binding, for the
+  workspace and topic named in the hint. The hint also says whether that
+  session is live (or could not be checked) or has ended. For a live binding
+  to the same workspace and topic as the invite, nothing is needed.
+  Otherwise, and for every ended binding, reset the plugin as in
+  [section 6](#6-switch-a-plugin-that-is-already-bound) and run the same join
+  again.
 
-An invite used up this way cannot be redeemed again (`INVITE_USED`). Either
-ask the owner for a new one, or, since you are already a member, reset the
-plugin and run `bind` as described at the end of this section.
+An ended binding is refused too, because the invite's workspace and topic are
+known only after it is redeemed. Even re-joining exactly the same ended
+binding now needs the reset first.
+
+Older plugin versions redeem the invite before they check the binding. There,
+a plugin bound elsewhere uses up the invite and the join reports `conflict`;
+a retry gives `INVITE_USED`. With an older version, run
+`/team-messaging:status` first and reset a plugin bound elsewhere **before**
+you join. If an invite was used up this way, either ask the owner for a new
+one, or, since you are already a member, reset the plugin and run `bind` as
+described at the end of this section.
 
 In Claude Code, with the code saved in a private file:
 
@@ -273,7 +313,7 @@ This was tested with real processes: `bob` already holds a minted credential
 credential and sends it as the bearer token. The broker adds the membership
 and the subscription and **mints no new token**, and the credential file is
 left byte-for-byte unchanged. Afterwards the same credential opens sessions in
-both `default/main` and `myproject/dev` (`channel/cli.mjs:80-83`,
+both `default/main` and `myproject/dev` (`channel/cli.mjs:116-120`,
 `broker/invites.mjs:70-71`).
 
 ```sh
@@ -281,14 +321,17 @@ node channel/cli.mjs join https://broker.example.com - --name bob --client none 
 # {"user":"bob","workspace":"myproject","topic":"dev","credential_path":"…/bob.token","adapters":[]}
 ```
 
-There is one catch with `--client claude-plugin` (from the code, not covered
-by the ops-scripts test). The invite is redeemed **before** the plugin
-binding is written (`channel/cli.mjs:83`, then `:106`). If the plugin is
-already bound to another workspace, the join reports `conflict` and writes no
-options, but bob is now a member and the invite is used. Running the same
-invite again gives `INVITE_USED`, because that check comes before the
-`ALREADY_MEMBER` check (`broker/invites.mjs:66`, `:71`). Switch the plugin as
-in section 6 and bind with
+With `--client claude-plugin` and a plugin still bound to `default/main`,
+the join stops with `PLUGIN_ALREADY_BOUND` before it redeems the invite
+(`channel/test/plugin-join.test.mjs`). Reset the plugin as in section 6 and
+run the same join again.
+
+Older plugin versions redeem the invite **before** they check the plugin
+binding. There the join reports `conflict` and writes no options, but bob is
+now a member and the invite is used. Running the same invite again gives
+`INVITE_USED`, because that check comes before the `ALREADY_MEMBER` check
+(`broker/invites.mjs:66`, `:71`). Switch the plugin as in section 6 and bind
+with
 `team-messaging bind https://broker.example.com --name bob --workspace myproject --topic dev --client claude-plugin`,
 which needs no invite.
 
@@ -362,10 +405,12 @@ plugin is installed. To run two bindings at once, use separate HOMEs. Whether
 
 | Code | Where it comes from | Meaning | Fix |
 |---|---|---|---|
-| `conflict` | `adapters[0].status`, `channel/plugin-config.mjs:57-64` | The plugin is bound to another broker, credential, workspace or topic, its configuration could not be read, or the saved session could not be checked (for example, the broker is unreachable). Nothing was written. A `join` that reports this has already redeemed the invite. | Reset as in section 6, then `bind` (the membership already exists). |
+| `conflict` | `adapters[0].status`, `channel/plugin-config.mjs:57-64` | The plugin is bound to another broker, credential, workspace or topic, its configuration could not be read, or the saved session could not be checked (for example, the broker is unreachable). Nothing was written. A `join` that reports this has already redeemed the invite. From 0.9.4, `join` refuses any saved binding before the invite (`PLUGIN_ALREADY_BOUND`), so it reports `conflict` only when the binding changed during the join. | Reset as in section 6, then `bind` (the membership already exists). |
+| `PLUGIN_ALREADY_BOUND` | `join` stderr, `channel/cli.mjs:70-100` | The plugin holds a saved binding for the workspace and topic named in the hint. The hint says whether that session is live (or could not be checked) or has ended. The invite was not used. | For a live binding to the same workspace and topic, nothing is needed. Otherwise, and for an ended binding, reset as in section 6 and run the same `join` again. |
+| `PLUGIN_NOT_READY` | `join` stderr, `channel/cli.mjs:70-100` | No `claude` CLI on PATH, the plugin is not installed, or its options could not be read. The invite was not used. | Install Claude Code and the plugin, or fix the plugin configuration, then run the same `join` again. |
 | `manual` | `adapters[0].status`, `channel/plugin-config.mjs:44`, `:54-56` | No `claude` CLI on PATH, or the plugin is not installed, so nothing could be written. | Install Claude Code and the plugin, then rerun. After a `join`, rerun as `bind`. |
 | `failed` | `adapters[0].status`, `channel/plugin-config.mjs:44` | `claude plugin configure` exited non-zero, so the options were not saved. After a `join`, the invite is already redeemed. | Check `claude plugin list` and the Claude Code output, then rerun as `bind`. |
-| `CREDENTIAL_MISSING` | `channel/cli.mjs:125` | `bind` found no saved credential for this exact broker URL and name. | Join with an invite first, or use the exact URL string the credential was saved with. |
+| `CREDENTIAL_MISSING` | `channel/cli.mjs:162` | `bind` found no saved credential for this exact broker URL and name. | Join with an invite first, or use the exact URL string the credential was saved with. |
 | `TOPIC_REQUIRED` | `broker/broker.mjs:50` | A workspace-level session, which only the workspace owner may open. | Members bind with `--topic` / set `TM_TOPIC` to a subscribed topic. |
 | `NOT_SUBSCRIBED` | `broker/broker.mjs:51` | A topic session for a topic this user is not subscribed to. | Redeem an invite for that topic (section 5 or the static join). |
 | `INVITE_EXPIRED` | `broker/invites.mjs:66` | The invite is older than `INVITE_TTL` (default 3600 s). | Ask the owner for a new invite. |

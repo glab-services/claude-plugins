@@ -5,7 +5,7 @@ import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { credentialPath, preflightCredentialDir, readCredential, writeCredential } from './credentials.mjs';
 import { register, available, pinnedSession } from './register.mjs';
-import { pluginAdapter } from './plugin-config.mjs';
+import { PLUGIN_ID, pluginAdapter, readPluginConfig } from './plugin-config.mjs';
 import { SAFE_URL, localError, pluginEnv, unsafeOption } from './plugin-env.mjs';
 import { Channel } from './channel.mjs';
 import { ChannelError, config, requireValue } from './config.mjs';
@@ -62,6 +62,42 @@ export function statusProbe({ fetcher, url, token, name, workspace, topic, timeo
     }catch{return {error:'STATUS_UNAVAILABLE'};}
   };
 }
+// join used to redeem the single-use invite first and only then find the
+// plugin bound elsewhere: the member lost the invite and got a conflict. So
+// the plugin binding is read here, before /join, and any saved binding or an
+// unreadable configuration is refused. pluginAdapter keeps its own checks after the redeem for a
+// binding that changes between this read and its write.
+async function pluginPrecheck({ spawn, env, fetcher, name, timeoutMs }) {
+  const current = readPluginConfig(PLUGIN_ID, { spawn, env });
+  requireValue(current.status === 'ok', 'PLUGIN_NOT_READY', `Install the plugin (claude plugin install ${PLUGIN_ID}) or fix its configuration, then run join again. The invite was not used.`);
+  const saved = current.values;
+  if (!['broker_url', 'token_file', 'workspace', 'session_id'].some(key => saved[key] !== '')) return;
+  // J-6: an ended binding is refused too. The invite's workspace and topic
+  // are unknown until it is redeemed, and pluginAdapter replaces only an
+  // identical ended binding, so letting an ended one through burned the
+  // invite for every other target. The probe only words the hint: a saved
+  // URL that join itself would refuse, an unreadable credential or a failed
+  // probe cannot be verified and is reported as live, as in pluginAdapter.
+  // The saved credential goes only to the broker it was saved for: the saved
+  // options are user-editable, so a token_file that is not this name's
+  // credential for that broker_url is never read or sent (review round 1).
+  let checked;
+  try {
+    requireValue(/^[A-Za-z0-9_.-]{1,128}$/.test(saved.session_id) && saved.session_id !== 'broker', 'INVALID_SESSION', 'unverifiable');
+    const url = normaliseUrl(saved.broker_url, env);
+    requireValue(saved.token_file === credentialPath(url, name, { env }), 'CREDENTIAL_MISMATCH', 'unverifiable');
+    const token = readCredential(saved.token_file, { home: env.HOME });
+    checked = await statusProbe({ fetcher, url, token, name, workspace: saved.workspace, topic: saved.topic === '' ? null : saved.topic, timeoutMs })(saved.session_id);
+  } catch {}
+  // The saved names come from a file the user can edit, so only valid ones
+  // are echoed; the credential path and its contents never are.
+  const workspace = /^[a-zA-Z0-9_.-]{1,128}$/.test(saved.workspace) ? `workspace "${saved.workspace}"` : 'an unrecognised workspace';
+  const topic = saved.topic === '' ? 'at workspace level' : topicPattern.test(saved.topic) ? `topic "${saved.topic}"` : 'an unrecognised topic';
+  const reset = 'reset the plugin (uninstall it, then install it again) and run join again. The invite was not used.';
+  throw new ChannelError('PLUGIN_ALREADY_BOUND', checked?.error === 'SESSION_ENDED'
+    ? `The plugin is still bound to ${workspace}, ${topic}, but that session has ended. Even for the same workspace and topic, ${reset}`
+    : `The plugin is already bound to ${workspace}, ${topic}, and that session is live or could not be checked. If this invite is for that same binding, nothing is needed. Otherwise ${reset}`);
+}
 async function recover(fetcher, url, token, timeoutMs) {
   try { await request(fetcher, url, '/credentials/revoke', {}, token, timeoutMs); return true; }
   catch { return false; }
@@ -79,6 +115,7 @@ export async function join(options, deps = {}) {
   preflightCredentialDir(dirname(path),{home:env.HOME});
   const existing = lstatSync(path, { throwIfNoEntry: false });
   const token = existing ? readCredential(path,{home:env.HOME}) : undefined;
+  if (options.client === 'claude-plugin') await pluginPrecheck({ spawn: deps.spawn, env, fetcher, name, timeoutMs });
   let joined,already=false;
   try { joined = await request(fetcher, url, '/join', { code: options.code, name }, token, timeoutMs); }
   catch (error) {

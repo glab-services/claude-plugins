@@ -1,6 +1,6 @@
 {
   "name": "team-messaging",
-  "version": "0.9.3",
+  "version": "0.9.4",
   "description": "Team agent messaging: a poll-mode channel MCP server, Stop and SessionStart hooks that wake the session for new messages, and join/bind/status/watch skills.",
   "author": { "name": "glab-services" },
   "license": "Apache-2.0",
