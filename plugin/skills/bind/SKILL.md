@@ -11,7 +11,7 @@ Arguments, if given: $ARGUMENTS
 Use this when you already hold a credential for the broker (from an earlier join) and want to own a new workspace.
 
 1. Ask for anything missing: the broker URL, your developer name and the new workspace name.
-2. If the team-messaging MCP tools are available, call `create_workspace` with that name. Skip this if the workspace already exists and you own it.
+2. If the team-messaging MCP tools are available, call `create_workspace` with that name. Skip this if the workspace already exists and you own it. `create_workspace` does not move the binding: the tools keep acting in the current workspace until step 3 binds the new one and Claude Code restarts.
 3. Bind the plugin to the workspace at workspace level (add `--topic '<topic>'` for a topic you are subscribed to):
 
    ```sh
