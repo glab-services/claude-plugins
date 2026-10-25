@@ -313,8 +313,8 @@ different developer tokens:
    Confirm B sees the tag text as escaped data inside the original message, with
    the original sender and `kind=question`, rather than as another channel event.
 
-The recorded acceptance run at a3cb921 (recorded in the private source repo)
-passed with two real interactive Claude Code 2.1.303 sessions and a local broker:
+An acceptance run at a3cb921 passed with two real interactive Claude Code
+2.1.303 sessions and a local broker:
 an ask arrived without any `/inbox` polling, its answer returned on the same
 thread, and forged channel tags stayed inert data with the original sender and
 kind. Only messaging tools were allowed; a startup attempt to use Bash was denied.

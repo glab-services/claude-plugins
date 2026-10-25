@@ -250,7 +250,6 @@ Run `pnpm messaging:hardening` for M3 timers/webhooks, SessionStart context, and
 the real-process SIGKILL/restart test. The latter kills the broker mid-stream,
 restarts against the same database, checks all 200 messages once, acknowledges
 out of order, kills again, and verifies cursor durability and subsequent delivery.
-M3 merged in the private source repo.
 The two-process regression covers concurrent writes, competing global claims,
 cross-process cursor visibility, and SQLite integrity. That is the current
 multi-process coverage boundary; webhook receivers still deduplicate event IDs.
