@@ -40,6 +40,10 @@ test('the build succeeds, validates and refuses unsafe output directories', t =>
   assert.deepEqual([marketplace.name, marketplace.plugins[0].source], ['team-messaging-local', './plugins/team-messaging']);
   assert.ok(marketplace.owner && marketplace.description);
   assert.equal(existsSync(join(plugin, '.claude-plugin', 'marketplace.json')), false, 'only one marketplace.json');
+  // Apache-2.0 section 4(a): the installed plugin and the published marketplace
+  // each carry the repository LICENSE byte for byte.
+  const license = readFileSync(fileURLToPath(new URL('../../LICENSE', import.meta.url)));
+  for (const dir of [plugin, out]) assert.deepEqual(readFileSync(join(dir, 'LICENSE')), license, `LICENSE in ${dir}`);
 });
 
 // Decision 150: SessionStart arms the same rewake watcher as Stop, so a

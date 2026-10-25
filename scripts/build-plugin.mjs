@@ -26,6 +26,10 @@ mkdirSync(join(plugin, 'runtime', 'shared'), { recursive: true });
 // runtime/channel and runtime/shared keep the channel's ../shared import valid.
 for (const file of readdirSync(join(root, 'channel'))) if (file.endsWith('.mjs')) cpSync(join(root, 'channel', file), join(plugin, 'runtime', 'channel', file));
 cpSync(join(root, 'shared', 'address.mjs'), join(plugin, 'runtime', 'shared', 'address.mjs'));
+// Apache-2.0 section 4(a) requires a copy of the license with every
+// redistribution. The plugin root is copied on its own at install, and the
+// marketplace root is what the plugin-dist branch publishes, so both get one.
+for (const dir of [plugin, out]) cpSync(join(root, 'LICENSE'), join(dir, 'LICENSE'));
 writeFileSync(join(out, '.claude-plugin', 'marketplace.json'), JSON.stringify({
   name: 'team-messaging-local', owner: { name: 'glab-services' }, description: 'Local marketplace for the team-messaging plugin bundle.',
   plugins: [{ name: 'team-messaging', source: './plugins/team-messaging', description: 'Team agent messaging channel, hooks and skills.' }],
