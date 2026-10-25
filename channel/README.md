@@ -823,37 +823,50 @@ The bundle copies `channel/*.mjs` and `shared/address.mjs` into `runtime/` and
 vendors `node_modules` with `npm ci`, because a local-path plugin gets no
 dependency install. The build runs `claude plugin validate --strict` on the
 plugin and the marketplace; without `claude` on PATH it fails unless
-`PLUGIN_VALIDATE_SKIP=1` is set. Every option is declared optional: Claude Code
-hides a plugin's MCP server while a required option is unset, and the plugin
-itself reports `PLUGIN_NOT_CONFIGURED` (MCP) or a join/bind hint
-(SessionStart) until configured. `claude mcp list` shows
-`plugin:team-messaging:team-messaging` as failed before configuration and
-connected after it.
+`PLUGIN_VALIDATE_SKIP=1` is set. Every option is declared optional: Claude
+Code hides a plugin's MCP server while a required option is unset.
 
-### Join and bind
+### One agent session per project (0.10)
 
-For a step-by-step walkthrough with copy-paste commands, see
-[docs/setup.md](../docs/setup.md).
+The global plugin options hold only the credential (`broker_url`,
+`token_file`, `mode`, `arm`). A project is bound by its own
+`.claude/settings.local.json`, which names the project's agent session
+(`claude_session_id`), one binding `workspace:topic:session` and a MAC over
+both, keyed by the credential. Only the agent session is active. In an idle
+project (no binding) or in any other session, the MCP server still starts but
+lists no tools, answers every call with `PROJECT_NOT_BOUND` (idle) or
+`NOT_AGENT_SESSION`, reads no token and never contacts the broker; the hooks
+are silent apart from one SessionStart line. There is no
+`PLUGIN_NOT_CONFIGURED` exit any more, so `claude mcp list` shows the server
+connected in every project. The model, the file shape, the trust checks and
+every error code are in [docs/setup.md](../docs/setup.md#one-agent-session-per-project).
 
-- Member: save the invite code from the owner in a private file, then run
-  `/team-messaging:join`. It runs
-  `team-messaging join <url> - --name <name> --client claude-plugin < <file>`,
-  stores a mode-0600 credential and writes only its path, the workspace, topic,
-  a fresh pinned session ID, `mode` and `arm` with
-  `claude plugin configure team-messaging@team-messaging-local --values-stdin`.
-  Delete the file and restart Claude Code.
-- Owner: `/team-messaging:bind` runs `create_workspace`, then
-  `team-messaging bind <url> --name <name> --workspace <ws> [--topic <t>] --client claude-plugin`.
-  Bind reuses the saved credential (`CREDENTIAL_MISSING` if there is none),
-  probes `/session/status` and writes the same seven options, with an empty
-  topic for a workspace-level binding. Restart, then `create_topic` and
-  `invite`; in plugin mode the invite hint points to `/team-messaging:join`.
-- Both report `registered`, `skipped` (same live binding), `conflict` (another
-  binding or an unreadable configuration; nothing is written) or `manual`
-  (no `claude` CLI or plugin), and `legacy_registration` when an older
-  user-scope `claude mcp` entry exists for the same binding.
-- `/team-messaging:status` prints the pinned session state; `workspaces` lists
-  memberships.
+### Join, bind and claim
+
+All three run in the session that should be the project's agent; the skills
+pass `--claude-session '${CLAUDE_SESSION_ID}' --data-dir '${CLAUDE_PLUGIN_DATA}'`,
+and the CLI finds the project through the record SessionStart writes.
+
+- Member: save the invite code in a private file, then run
+  `/team-messaging:join`. It redeems the invite (after checking the project
+  and the saved credential, so a conflict never burns the invite), stores a
+  mode-0600 credential, saves its URL and path globally if none is saved, and
+  writes the project file. Delete the file and reconnect the MCP server.
+- Owner: `/team-messaging:bind` runs
+  `team-messaging bind <url> --name <name> --workspace <ws> [--topic <t> [--mode broadcast|queue]]`.
+  It reuses the saved credential (`CREDENTIAL_MISSING` if there is none),
+  creates the workspace or reuses one you own, creates or reuses the topic,
+  subscribes you and writes the project file. A member who is already
+  subscribed binds another project with the same command and `--topic`.
+  `invite` is a separate step afterwards.
+- `/team-messaging:claim` (user-only skill) moves the agent role to the
+  current session and keeps the broker session. `bind --adopt-global` moves a
+  0.9 global binding into one project.
+- `adapters[0].status` is `registered`, `skipped` (already bound the same
+  way), `conflict`, `failed` or `manual`; `legacy_registration` flags an older
+  user-scope `claude mcp` entry for the same binding.
+- `/team-messaging:status` prints `{state, agent, project_root, workspace, topic}`;
+  `workspaces` lists memberships.
 
 ### Arm modes
 
