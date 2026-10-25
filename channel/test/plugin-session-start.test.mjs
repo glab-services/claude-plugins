@@ -123,3 +123,21 @@ for (const order of ['context first', 'watcher first', 'concurrently'])
     assert.deepEqual(reported(stateDir(s.data, { home: s.home }), key), [sent.id], 'only the watcher claimed it');
     assert.equal(f.store.get('SELECT acked_at FROM messages WHERE id=?', sent.id).acked_at, null);
   });
+
+// J-7 risk check with a real hook process. plugin-env.mjs:10 reads
+// CLAUDE_PLUGIN_OPTION_TOPIC first and falls back to TM_TOPIC only when that
+// variable is absent ("" is kept, and means workspace level). This records
+// what the hook sends for a workspace-level binding when the shell that
+// started Claude Code exported TM_TOPIC. The absent case is a known leak, not
+// fixed yet; flip that assertion when config resolution is fixed.
+test('an exported TM_TOPIC reaches the hook only when the topic option variable is absent', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), seen = [];
+  f.server.on('request', req => seen.push(req.headers['x-topic'] ?? null));
+  const empty = await start(s, f, 'empty', { CLAUDE_PLUGIN_OPTION_TOPIC: '', CLAUDE_PLUGIN_OPTION_SESSION_ID: 'ws-empty', TM_TOPIC: 'dev' }).result;
+  assert.equal(empty.code, 0, empty.stderr);
+  assert.ok(seen.length > 0 && seen.every(topic => topic === null), 'an empty option keeps the hook at workspace level');
+  seen.length = 0;
+  const absent = await start(s, f, 'absent', { CLAUDE_PLUGIN_OPTION_SESSION_ID: 'ws-absent', TM_TOPIC: 'dev' }).result;
+  assert.equal(absent.code, 0, absent.stderr);
+  assert.ok(seen.length > 0 && seen.every(topic => topic === 'dev'), 'with the option variable absent, the exported TM_TOPIC is used');
+});
