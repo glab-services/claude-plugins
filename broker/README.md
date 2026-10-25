@@ -392,7 +392,7 @@ that user on restart. Workspace/membership operations are introduced later.
 `broker/test/schema-v5.test.mjs` covers migrated/fresh schema equality, the exact
 M4 backup, legacy row/claim/sequence preservation, old-binary refusal, open M4
 connection refusal, exclusive backup/write exclusion, and the real migration CLI. These are SQLite/HTTP
-and process integration checks. No new real Claude Code or Codex acceptance run
+and process integration checks. No new real Claude Code acceptance run
 is claimed for M5a.
 
 ## M5b: workspaces
@@ -447,7 +447,7 @@ Run `pnpm messaging:workspaces` for the schema suite and real HTTP/SSE isolation
 checks using the same users in both projects, identical workstream names, scoped
 planning/claims/escalations, membership revocation and delayed-body authorization.
 The six existing gates remain required. These are HTTP/stdio/process integration
-checks; real Claude Code or Codex workspace acceptance is UNVERIFIED for M5b.
+checks; real Claude Code workspace acceptance is UNVERIFIED for M5b.
 
 ## M6a: membership lifecycle and notices
 
@@ -508,7 +508,7 @@ Run `pnpm messaging:membership` for real HTTP/stdio lifecycle tests, the delayed
 send/removal case, an actual trigger-induced finish rollback, per-user notice
 acks, a separate-process static bootstrap, and human CLI archive/audit behavior.
 The schema suite also verifies exact v5 backup and v5→v6 schema equality.
-These are automated integrations; no new real Claude Code/Codex acceptance run
+These are automated integrations; no new real Claude Code acceptance run
 is claimed.
 
 ## M6b: invites and minted credentials
@@ -586,7 +586,7 @@ invite redemption races, revocation, restart persistence, last-membership
 termination, owner recovery refusal, rate/body limits, identity reservation and
 secret-free log/error checks. The race cases are regression guards for SQLite
 transaction serialization plus guarded updates. Automated tests are distinct
-from real Claude Code/Codex invite acceptance, which remains **UNVERIFIED**.
+from real Claude Code invite acceptance, which remains **UNVERIFIED**.
 
 ## M7a: topics
 
@@ -645,7 +645,7 @@ ownership, close notices, scoped removal/handover, archive behavior, deferred
 delivery and atomic topic-invite redemption with a real trigger failure. Existing
 schema tests compare direct and stepwise upgrades against fresh DDL, exact
 private backups, NULL backfill and refusal by a frozen v7 Store fixture.
-Real Claude/Codex topic acceptance remains **UNVERIFIED**. Before implementation,
+Real Claude Code topic acceptance remains **UNVERIFIED**. Before implementation,
 all eight baseline gates passed on `12dfab3`; the reported intermittent M6a finish
 case did not reproduce in 20 consecutive isolated runs, so no speculative fix
 was made.
@@ -714,7 +714,7 @@ replay/ack/unsubscribe behavior. SIGKILL during a real stdio topic stream and tw
 broker restarts preserve every message and the user's sparse acks without duplicate
 pushes in the surviving channel process. This is process-crash evidence, not
 power-loss simulation. The existing hardening index test is unchanged and green.
-Real Claude/Codex topic acceptance remains **UNVERIFIED**.
+Real Claude Code topic acceptance remains **UNVERIFIED**.
 
 ## M7c: skip and pins
 
@@ -751,7 +751,7 @@ ending deletes only their pins in that workspace, in the lifecycle transaction.
 `pnpm messaging:topics` covers real HTTP/SSE and stdio skip/pin flows, sparse acks,
 future-message delivery, claim ownership, filtering, limits, isolation and cleanup.
 Fault injection checks rollback, and guard-removal mutations distinguish the new
-skip/pin invariants. Actual Claude/Codex acceptance remains **UNVERIFIED**. No live
+skip/pin invariants. Actual Claude Code acceptance remains **UNVERIFIED**. No live
 deployment or systemd changes occur before the user-authorized M9b boundary.
 
 ## M8a: queue topics
@@ -809,7 +809,7 @@ read-only replies, access/isolation, leave/finish/remove release and cross-proce
 re-offers. Single-connection races are labelled regression guards: SQLite's
 transaction exclusion is the guarantee. The schema reserves `dead` for M8b, but
 no expiry retry job, dead-letter workflow or crash-recovery acceptance is added
-here. Those and retention remain later milestones. Real Claude/Codex acceptance
+here. Those and retention remain later milestones. Real Claude Code acceptance
 is **UNVERIFIED**. No live deployment or systemd changes before M9b.
 
 ## M8b: dead-letter and recovery
@@ -871,7 +871,7 @@ checks lease/attempt/generation/result/audit consistency. A committed claim is
 also killed during processing; its former stdio holder receives the newer offer
 after expiry and completes once at a higher fence. These restart tests run in
 `messaging:hardening` too. This is process-crash evidence, not a power-loss test.
-Actual Claude/Codex acceptance and cross-process clock skew remain **UNVERIFIED**.
+Actual Claude Code acceptance and cross-process clock skew remain **UNVERIFIED**.
 No live deployment or systemd changes before M9b.
 
 ## M9a: retention eligibility
@@ -924,7 +924,7 @@ require an unpurged visible message. No historical body is erased by this releas
 positive controls for eligibility blockers, age boundaries, workspace/topic
 isolation and tombstone snapshots. Migration tests cover v11→v12 and older
 stores, strict schema equality, private exact backups and historical-binary
-refusal. Real Claude/Codex acceptance remains **UNVERIFIED**. No deployment or
+refusal. Real Claude Code acceptance remains **UNVERIFIED**. No deployment or
 systemd changes before M9b.
 
 ## M9b: bounded, audited retention
@@ -1009,7 +1009,7 @@ run-counter and audit consistency. Two broker processes also race compaction
 under independent SQLite connections (a regression guard for BEGIN IMMEDIATE).
 Process cases also run in `messaging:hardening`. Migration coverage includes
 older stores and frozen v12 fixtures. This proves process-crash recovery, not
-power-loss durability; real Claude/Codex acceptance remains **UNVERIFIED**.
+power-loss durability; real Claude Code acceptance remains **UNVERIFIED**.
 
 ## M10: hardening
 

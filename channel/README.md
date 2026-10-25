@@ -403,7 +403,7 @@ Polling-only hosts receive local tool errors when notification push is unavailab
 with zero background requests after removal, heartbeat-only removal, independent
 workspace activity, notice acknowledgment and broker permission checks without
 client approval hints. The integration smoke now checks 18 tools. These are
-SDK/HTTP/stdio checks; real Claude Code/Codex membership acceptance is UNVERIFIED.
+SDK/HTTP/stdio checks; real Claude Code membership acceptance is UNVERIFIED.
 
 ## M6b: invites and credential deactivation
 
@@ -425,7 +425,7 @@ behavior. A successful in-flight finish can still return its committed result.
 
 `pnpm messaging:membership` tests these paths through real stdio and HTTP,
 including ten poll intervals without requests after deactivation and continued
-static-token retries. Real Claude Code/Codex invite acceptance is **UNVERIFIED**.
+static-token retries. Real Claude Code invite acceptance is **UNVERIFIED**.
 
 ## M6c: joining a workspace
 
@@ -436,7 +436,7 @@ the workspace owner, adding your broker name and an optional client selection:
 team-messaging join https://broker.example - --name alice
 # Paste the owner's single-use code on stdin, then end input (Ctrl-D on Unix).
 # Choose one adapter, or skip registration:
-team-messaging join https://broker.example - --name alice --client codex
+team-messaging join https://broker.example - --name alice --client claude
 team-messaging join https://broker.example - --name alice --client none
 ```
 
@@ -482,14 +482,18 @@ be confirmed, ask the owner to remove that membership. Existing credential files
 are never overwritten. Adapter failure does not discard a successfully saved
 credential; `failed`/`manual` outcomes require manual client setup.
 
-By default, adapters run for each of `claude` and `codex` found on PATH. Select
-`--client claude`, `--client codex` or `--client none` to control this. Registration
-uses the clients' own CLIs for all configuration writes. Registrations have a
+By default, the adapter runs for `claude` when it is found on PATH. Select
+`--client claude` or `--client none` to control this. Registration
+uses the client's own CLI for all configuration writes. Registrations have a
 safe name of at most64 characters, derived from the broker URL, workspace,
 topic and client, with a structured tuple digest preventing collisions after
 sanitization or truncation. The `-t-` name marker separates these registrations
 from older workspace-only names. Existing legacy registrations need manual
 removal if they are no longer wanted; join does not overwrite them.
+
+Codex is not supported. `--client codex` is refused with `INVALID_CLIENT` before
+the invite is used. Codex entries registered by earlier releases are left as
+they are; remove them with Codex's own CLI.
 
 Join derives `CHANNEL_TOPIC` from the invite. Each registration pins a fresh
 `<client>-<tuple-digest-12>-<32-random-hex>` session ID. Existing matching active
@@ -510,11 +514,9 @@ Claude registration lookup reads only the generated entry's binding fields
 from `CLAUDE_CONFIG_DIR/.claude.json`, otherwise `HOME/.claude.json`; it never
 prints config contents or uses `claude mcp get`, which health-checks transports.
 Project/local shadows, malformed/unreadable configuration and unverifiable
-replacement entries cause a conflict. Codex lookup uses `mcp get --json`;
-an isolated marker smoke confirmed that this lookup does not start its transport.
-The selected client CLI performs every write. Neither client receives tokens
-in argv: only URL, token-file path, workspace, topic and pinned session ID,
-plus `CHANNEL_MODE=poll` for Codex.
+replacement entries cause a conflict. The selected client CLI performs every
+write. The client receives no tokens in argv: only URL, token-file path,
+workspace, topic and pinned session ID.
 
 The Claude adapter returns `hook_env` with `BROKER_URL`, `CHANNEL_SESSION_ID`,
 `CHANNEL_WORKSPACE`, `CHANNEL_TOPIC` and `BROKER_TOKEN_FILE`. Share the complete
@@ -523,24 +525,24 @@ The CLI does not edit hook settings. Claude push needs the server
 [loaded as a channel](https://code.claude.com/docs/en/channels-reference);
 registration alone does not prove push delivery.
 
-Interface check on 2026-10-20: `codex mcp add --help` on codex-cli 0.163.0 and
-`claude mcp add --help` on Claude Code 2.1.304 matched the planned flags and
-argument ordering. Claude's patch version changed from the planning check
-(2.1.303); no interface drift was observed. Whether env values are persisted in
-each real client's config remains UNVERIFIED; no secret is passed either way.
+Interface check on 2026-10-20: `claude mcp add --help` on Claude Code 2.1.304
+matched the planned flags and argument ordering. Claude's patch version changed
+from the planning check (2.1.303); no interface drift was observed. Whether env
+values are persisted in the real Claude Code config remains UNVERIFIED; no
+secret is passed either way.
 
 `pnpm messaging:membership` now includes real CLI/HTTP/stdio integration using
 scratch HOME/XDG_CONFIG_HOME and fake client binaries. It verifies permission and
 symlink checks, no-overwrite publication, credential reuse, pinned IDs across two
 stdio processes, recovery revoke, redirects, IPv6 loopback, unsafe transport
 preflight, adapter outcomes, and absence of secrets in captured output/argv.
-**UNVERIFIED: real Claude/Codex registration — not run.** No real client settings,
+**UNVERIFIED: real Claude Code registration — not run.** No real client settings,
 live broker deployment or systemd service was changed.
 
 Back out by reverting the channel release. The broker's memberships and credentials
 are unaffected by that revert. The user can remove unwanted local files at the
 credential path printed by the CLI; remove corresponding client registrations
-through each client's CLI. Deleting a local file alone does not revoke its broker
+through the Claude CLI. Deleting a local file alone does not revoke its broker
 credential or end membership.
 
 ## M7a: topic lifecycle
@@ -563,7 +565,7 @@ M7b. No per-user topic ack, skip, pin or queue tools are introduced here.
 
 `pnpm messaging:topics` verifies these tools through real stdio and broker HTTP,
 including close-notice push and rejection of malformed slash names. These are
-SDK integrations. Real Claude/Codex topic acceptance is **UNVERIFIED**.
+SDK integrations. Real Claude Code topic acceptance is **UNVERIFIED**.
 
 ## M7b: broadcast topic messages
 
@@ -590,7 +592,7 @@ It also checks `inbox` and `wait` in poll mode for topic, user and workstream
 addresses, then sends to each returned `reply_to` on the exact inbound thread.
 The surviving channel deduplicates presentation IDs; a new process intentionally
 restores still-unacked context. Automated SDK/HTTP/SSE/stdio checks are distinct
-from real Claude/Codex acceptance, which remains **UNVERIFIED**. No live deployment
+from real Claude Code acceptance, which remains **UNVERIFIED**. No live deployment
 or systemd configuration was changed.
 
 ## M7c: skip and pins
@@ -613,8 +615,8 @@ messages still follow the topic address and sibling ownership rules.
 
 The stdio test covers the four tools, metadata, escaped pin results, limits,
 skipped-buffer refresh, a reply and explicit ack after skip, and a later pending
-push. These automated SDK/HTTP/SSE/stdio checks are distinct from real Claude or
-Codex acceptance, which remains **UNVERIFIED**. Queue and retention features are
+push. These automated SDK/HTTP/SSE/stdio checks are distinct from real Claude Code acceptance,
+which remains **UNVERIFIED**. Queue and retention features are
 later milestones.
 
 ## M8a: queue topics
@@ -646,7 +648,7 @@ leases, generations and results are durable.
 `pnpm messaging:queue` checks real SDK stdio round trips, metadata, competing
 sibling claims, renew/completion, escaped results, release re-offers and stale
 presentation guards. Broker integration also covers two processes and real
-SQLite rollback faults. Actual Claude/Codex acceptance remains **UNVERIFIED**;
+SQLite rollback faults. Actual Claude Code acceptance remains **UNVERIFIED**;
 M8b retry/dead-letter/crash-recovery work and M9 retention are outside M8a.
 
 ## M8b: dead-letter and recovery
@@ -669,7 +671,7 @@ Automated stdio checks cover owner access, escaped dead-letter results, requeue
 and subsequent completion. Real broker SIGKILL tests cover claim/done/requeue
 before and after commit and a surviving channel's expiry recovery after restart.
 They verify one accepted completion, consistent fences/budgets and replay without
-claiming once-only external effects. Actual Claude/Codex acceptance remains
+claiming once-only external effects. Actual Claude Code acceptance remains
 **UNVERIFIED**. Retention is still M9; no live/systemd changes were made.
 ## M9a: retention eligibility
 
@@ -680,7 +682,7 @@ The channel adds no retention/compaction tool. Only the local human broker CLI
 can inspect `retention --dry-run` counts and blockers. M9a has no purge writer;
 compaction belongs to M9b after review. Existing tools keep their authorization
 and escaped untrusted-data results. `pnpm messaging:retention` includes real
-stdio placeholder/no-delivery coverage; actual Claude/Codex acceptance remains
+stdio placeholder/no-delivery coverage; actual Claude Code acceptance remains
 **UNVERIFIED**.
 
 ## M9b: retention
@@ -692,7 +694,7 @@ render `[purged by retention run <id>]` through existing read tools. Purged
 messages never enter pending delivery. Blocked retention can produce ordinary
 durable owner notices containing metadata only; their content remains untrusted
 and requires explicit acknowledgment. See the broker's M9b runbook for the
-human CLI, settings, backup and irreversibility rules. Real Claude/Codex
+human CLI, settings, backup and irreversibility rules. Real Claude Code
 acceptance remains **UNVERIFIED**.
 
 ## M10: hardening
@@ -760,8 +762,8 @@ acceptance, which remains **UNVERIFIED**.
    shell arguments, logs or a repository.
 3. On the other machine install the repository dependencies with Node24+ and
    pnpm. Run the returned `team-messaging join <broker-url> - --name <name>`
-   command and paste the invite code on stdin. Select `--client claude` or
-   `--client codex` if desired. Join stores a private credential and registers
+   command and paste the invite code on stdin. Select `--client claude` to
+   choose the adapter explicitly. Join stores a private credential and registers
    that topic with its own name and pin; another topic gets a distinct entry.
 4. In the member's topic-bound client call
    `ask({to:"user:<owner>",body:"Please review this change"})`. The owner
@@ -781,9 +783,9 @@ heartbeats, active pins retain last_seen/leases, two topic aliases cannot
 collide, and hook plus MCP share one topic-bound session without claiming
 messages. Temporary client homes verify registration argv and read-only lookup
 without exposing another server's secret sentinel. An isolated actual CLI
-marker smoke covered add/get/remove: Codex get did not start the transport;
-Claude get did, so production lookup avoids it. These checks do not establish
-real interactive Claude Code channel acceptance or Codex UI behavior.
+marker smoke covered add/get/remove: Claude get started the transport, so
+production lookup avoids it. These checks do not establish real interactive
+Claude Code channel acceptance.
 
 Startup binding errors stop once without retries, including ownership and
 workspace/topic mismatch, a closed topic for a new session, missing required
