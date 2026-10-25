@@ -5,9 +5,11 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { config } from './config.mjs';
 import { createChannelServer } from './server.mjs';
 
-export async function runStdio(env, { plugin = false } = {}) {
+// isActive (plugin-main.mjs, plan project-options AM-6) is passed through to
+// the server; without it the server is always active, as before.
+export async function runStdio(env, { plugin = false, isActive } = {}) {
   try {
-    const { server, channel, recordHostRequest } = createChannelServer(config(env), undefined, { onIdle: stop, plugin });
+    const { server, channel, recordHostRequest } = createChannelServer(config(env), undefined, { onIdle: stop, plugin, isActive });
     let stopping;
     function stop() { return stopping ??= (async () => { await channel.stop(); await server.close(); })(); }
     process.once('SIGINT', () => { void stop(); });

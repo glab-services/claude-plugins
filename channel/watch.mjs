@@ -4,7 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { config, requireValue } from './config.mjs';
 import { Channel } from './channel.mjs';
-import { localError, pluginEnv } from './plugin-env.mjs';
+import { agentCheck, hookOptions, localError, resolveBinding, tmOptions } from './plugin-env.mjs';
+import { readSessionRecord } from './project-options.mjs';
 import { acquireLock, claimUnreported, markEnded, stateDir, unclaim } from './watch-state.mjs';
 
 // The Stop hook entry in plugin/hooks/hooks.json uses HOOK_TIMEOUT_S. Its
@@ -24,7 +25,7 @@ function parseArgs(argv) {
   const options = {};
   for (let i = 0; i < argv.length; i += 2) {
     const name = argv[i]?.slice(2);
-    requireValue(['mode', 'session-key', 'data-dir', 'deadline-s', 'poll-s'].includes(name) && argv[i].startsWith('--') && argv[i + 1] !== undefined && !Object.hasOwn(options, name), 'INVALID_WATCH_ARGS', 'Use watch.mjs --mode rewake|bash [--session-key id] --data-dir dir [--deadline-s n] [--poll-s n].');
+    requireValue(['mode', 'session-key', 'data-dir', 'deadline-s', 'poll-s', 'project-dir', 'claude-session'].includes(name) && argv[i].startsWith('--') && argv[i + 1] !== undefined && !Object.hasOwn(options, name), 'INVALID_WATCH_ARGS', 'Use watch.mjs --mode rewake|bash [--session-key id] [--claude-session id] [--project-dir dir] --data-dir dir [--deadline-s n] [--poll-s n].');
     options[name] = argv[i + 1];
   }
   requireValue(['rewake', 'bash'].includes(options.mode), 'INVALID_WATCH_ARGS', 'Pass --mode rewake or --mode bash.');
@@ -64,11 +65,6 @@ export async function watch(argv = process.argv.slice(2), env = process.env, { a
   // input read, is bounded by it.
   const deadline = Date.now() + options.deadlineS * 1000;
   const rewake = options.mode === 'rewake', out = text => (rewake ? process.stderr : process.stdout).write(text + '\n');
-  const plugin = pluginEnv(env);
-  // A rewake watcher that is off or unconfigured must stay silent: exit 2
-  // would wake the session, and any other output is noise at every Stop.
-  if (rewake && (!plugin.configured || plugin.arm === 'off')) return 0;
-  if (!plugin.configured) { diagnostic('watch_not_configured', { code: 'NOT_CONFIGURED', hint: 'Run /team-messaging:join or /team-messaging:bind, then restart Claude Code.' }); return 5; }
   let channel, lock, key, dir;
   const controller = new AbortController(), stopOn = () => { controller.abort(); void channel?.stop(); };
   process.once('SIGTERM', stopOn); process.once('SIGINT', stopOn);
@@ -91,6 +87,20 @@ export async function watch(argv = process.argv.slice(2), env = process.env, { a
       hookKey = read.value;
     }
     key = rewake ? (options['session-key'] ?? hookKey) : options['session-key'];
+    // Plan project-options P-8, AM-1. The rewake watcher is a hook: its options
+    // come from CLAUDE_PLUGIN_OPTION_*, its Claude session from the hook input
+    // (or --claude-session when started with --session-key) and its project
+    // from --project-dir. The Bash watcher has TM_* from the skill, its Claude
+    // session from --claude-session '${CLAUDE_SESSION_ID}', and its project
+    // from the SessionStart record, since the Bash env has no project path (U-6).
+    const claudeSession = options['claude-session'] ?? (rewake ? hookKey : undefined);
+    const projectDir = options['project-dir'] ?? (options['data-dir'] && claudeSession ? readSessionRecord(options['data-dir'], claudeSession, { home: env.HOME }) : undefined);
+    const plugin = resolveBinding({ options: rewake ? hookOptions(env) : tmOptions(env), claudeSession, projectDir, env });
+    // A rewake watcher that is off, idle, inert or refused must stay silent:
+    // exit 2 would wake the session, and any other output is noise at every Stop.
+    if (rewake && (plugin.state !== 'active' || plugin.arm === 'off')) return 0;
+    if (plugin.state !== 'active') { diagnostic('watch_not_configured', { code: plugin.state === 'idle' ? 'PROJECT_NOT_BOUND' : plugin.code, hint: plugin.hint }); return 5; }
+    const stillAgent = agentCheck(plugin, { projectDir, env });
     dir = stateDir(options['data-dir'], { home: env.HOME });
     const settings = config({ ...plugin.env, CHANNEL_MODE: 'poll' });
     // The host is the parent at start (decision 151): the lock names it, and
@@ -106,7 +116,9 @@ export async function watch(argv = process.argv.slice(2), env = process.env, { a
     // reported for a session that no longer exists: it stops silently instead.
     const orphaned = () => process.ppid !== parent || !alive(parent);
     while (Date.now() < deadline && !controller.signal.aborted) {
-      if (orphaned()) return 0;
+      // P-11: a watcher whose session stopped being the agent (claim) exits
+      // silently at its next poll.
+      if (orphaned() || !stillAgent()) return 0;
       try {
         // inbox() has its own per-request timeout; bounding it also keeps a
         // slow page from outliving the deadline or a SIGTERM.
@@ -116,7 +128,7 @@ export async function watch(argv = process.argv.slice(2), env = process.env, { a
         // The host can die while inbox() is in flight. An orphan must not
         // claim: the IDs would be marked reported for the dead host and the
         // new host's watcher would never wake for them (decision 151).
-        if (orphaned()) return 0;
+        if (orphaned() || !stillAgent()) return 0;
         backoff = pollMs;
         const claimed = await claimUnreported(dir, key, messages.map(message => message.id)), fresh = new Set(claimed);
         if (claimed.length && afterClaim) await bounded(Promise.resolve().then(afterClaim));

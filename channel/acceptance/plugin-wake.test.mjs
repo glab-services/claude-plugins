@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join, resolve, sep } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { userInfo } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { testTempDir } from '../../test-support/temp.mjs';
-import { brokerFixture, tokens } from '../test/helpers.mjs';
+import { brokerFixture, tokens, bindProject } from '../test/helpers.mjs';
+import { credentialPath } from '../credentials.mjs';
 import { PLUGIN_ID, writePluginConfig } from '../plugin-config.mjs';
 
 // Scripted part of after-A3 (arm=rewake): an idle interactive Claude Code
@@ -51,10 +52,15 @@ test('real Claude Code: an idle plugin session wakes through the asyncRewake wat
     rmSync(dir, { recursive: true, force: true });
   });
   const fixture = await brokerFixture(t, { defaultOwner: 'bob' });
-  const credentials = join(dir, 'credentials'); mkdirSync(credentials, { mode: 0o700 });
-  const tokenFile = join(credentials, 'bob.token'); writeFileSync(tokenFile, tokens.bob, { mode: 0o600 });
-  assert.equal(writePluginConfig(PLUGIN_ID, { broker_url: fixture.url, token_file: tokenFile, workspace: 'default', topic: '', session_id: `wake-${id}`, mode: 'poll', arm: 'rewake' }, { env }), 'registered');
+  // Plan project-options: the global options hold only the credential, saved
+  // where join saves it for this broker URL (AM-2), and the project file names
+  // this Claude session as the agent with a workspace-level binding.
+  const tokenFile = credentialPath(fixture.url, 'bob', { env: { HOME: home } });
+  mkdirSync(dirname(tokenFile), { recursive: true, mode: 0o700 }); writeFileSync(tokenFile, tokens.bob, { mode: 0o600 });
+  t.after(() => rmSync(tokenFile, { force: true }));
+  assert.equal(writePluginConfig(PLUGIN_ID, { broker_url: fixture.url, token_file: tokenFile, workspace: '', topic: '', session_id: '', mode: 'poll', arm: 'rewake' }, { env }), 'registered');
   const session = randomUUID();
+  bindProject(project, { url: fixture.url, claudeSession: session, session: `wake-${id}` });
   child = spawn('script', ['-q', '-c', `claude --debug-file ${debugLog} --session-id ${session} 'say ready'`, '/dev/null'], { cwd: project, env, stdio: ['pipe', 'ignore', 'ignore'] });
   // Best effort: accept the workspace trust dialog if it appears.
   for (const ms of [3000, 6000]) setTimeout(() => child.stdin.write('\r'), ms).unref();

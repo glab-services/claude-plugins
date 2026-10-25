@@ -2,7 +2,8 @@ import {prepareTopicFixture,FIXTURE_TOPIC} from '../../test-support/topic-fixtur
 import { fileURLToPath } from 'node:url';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHmac } from 'node:crypto';
 import { dirname, join as pathJoin } from 'node:path';
 import { testTempDir } from '../../test-support/temp.mjs';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -12,6 +13,8 @@ import { Store } from '../../broker/store.mjs';
 import { Broker } from '../../broker/broker.mjs';
 import { config } from '../../broker/config.mjs';
 import { createServer } from '../../broker/server.mjs';
+import { credentialPath } from '../credentials.mjs';
+import { writeSessionRecord } from '../project-options.mjs';
 
 export const tokens = { alice: 'alice-test-token-0000000000000000', bob: 'bob-test-token-000000000000000000' };
 export async function brokerFixture(t, { streamStatus, ...overrides } = {}) {
@@ -108,12 +111,39 @@ export async function freezingProxy(t, fixture) {
 
 // Plugin hook and watcher tests: a private HOME holding a mode-0600 token
 // file and a plugin data directory, as Claude Code lays them out.
+// Plan project-options: a hook gets only broker_url and token_file from the
+// saved options (env), and its binding from a project file naming the hook's
+// Claude session. `tokenFile` is a hand-named credential, which AM-2 refuses;
+// env() saves the token where join does for that broker URL.
+// - env(fixture, extra): the hook env (CLAUDE_PLUGIN_OPTION_*);
+// - tmEnv(fixture, extra): the MCP, CLI and Bash-watcher env (TM_*);
+// - project(fixture, key, binding): a project bound to Claude session `key`;
+// - unbound(): a project without a binding;
+// - hook(fixture, key, binding): the hook args --project-dir and --data-dir;
+// - bash(fixture, key, binding): --claude-session, with the SessionStart
+//   record that points the Bash watcher at the project.
 export function pluginScratch(t, { token = tokens.bob } = {}) {
   const dir = testTempDir('plugin-'); t.after(() => rmSync(dir, { recursive: true, force: true }));
   const home = pathJoin(dir, 'home'), data = pathJoin(home, '.claude', 'plugins', 'data', 'team-messaging'), tokenFile = pathJoin(home, '.config', 'team-messaging', 'credentials', 'plugin.token');
   mkdirSync(dirname(tokenFile), { recursive: true, mode: 0o700 }); writeFileSync(tokenFile, token, { mode: 0o600 });
-  return { dir, home, data, tokenFile, env: (fixture, extra = {}) => ({ HOME: home, TMPDIR: process.env.TMPDIR, CLAUDE_PLUGIN_DATA: data,
-    CLAUDE_PLUGIN_OPTION_BROKER_URL: fixture.url, CLAUDE_PLUGIN_OPTION_TOKEN_FILE: tokenFile, CLAUDE_PLUGIN_OPTION_WORKSPACE: 'default', CLAUDE_PLUGIN_OPTION_SESSION_ID: 'shared-b', ...extra }) };
+  const s = { dir, home, data, tokenFile };
+  const credential = (fixture, name = 'bob', secret = token) => credentialScratch(s, fixture.url, { name, token: secret });
+  const projects = new Map();
+  s.env = (fixture, extra = {}) => ({ HOME: home, TMPDIR: process.env.TMPDIR, CLAUDE_PLUGIN_DATA: data, CLAUDE_PLUGIN_OPTION_BROKER_URL: fixture.url, CLAUDE_PLUGIN_OPTION_TOKEN_FILE: credential(fixture), ...extra });
+  s.tmEnv = (fixture, extra = {}) => ({ HOME: home, TMPDIR: process.env.TMPDIR, TM_BROKER_URL: fixture.url, TM_TOKEN_FILE: credential(fixture), ...extra });
+  s.project = (fixture, key, binding = {}) => {
+    const id = JSON.stringify([fixture.url, key, binding.workspace, binding.topic, binding.session, binding.token]);
+    if (!projects.has(id)) {
+      const project = pathJoin(dir, 'projects', `p${projects.size}`);
+      bindProject(project, { url: fixture.url, claudeSession: key, token: binding.token ?? token, ...(binding.workspace ? { workspace: binding.workspace } : {}), ...(binding.topic ? { topic: binding.topic } : {}), ...(binding.session ? { session: binding.session } : {}) });
+      projects.set(id, project);
+    }
+    return projects.get(id);
+  };
+  s.unbound = () => { const project = pathJoin(dir, 'projects', 'unbound'); mkdirSync(pathJoin(project, '.git'), { recursive: true, mode: 0o700 }); return project; };
+  s.hook = (fixture, key, binding) => ['--project-dir', s.project(fixture, key, binding), '--data-dir', data];
+  s.bash = (fixture, key, binding) => { writeSessionRecord(data, key, s.project(fixture, key, binding), { home }); return ['--claude-session', key]; };
+  return s;
 }
 // Recreates what Claude Code leaves under umask 002: ~/.claude/plugins,
 // plugins/data and the plugin data dir at `mode`, below `claude` (the
@@ -133,4 +163,37 @@ export function runChannel(script, args = [], env = {}, stdin = '') {
   child.stdin.on('error', () => {}); child.stdin.end(stdin);
   const result = new Promise((resolve, reject) => { child.once('error', reject); child.once('close', (code, signal) => resolve({ code, signal, stdout, stderr, ms: Date.now() - started })); });
   return { child, result };
+}
+
+// Project-file fixtures (plan project-options AM-3, AM-4). The MAC is
+// computed here independently of channel/project-options.mjs, so a test
+// that accepts a file also checks the production MAC against this one.
+export const PLUGIN_KEY = 'team-messaging@team-messaging-local';
+export function projectMac({ root, url, version = 1, claudeSession, bindings, token }) {
+  const key = createHmac('sha256', token).update('team-messaging project binding v1').digest();
+  return createHmac('sha256', key).update(JSON.stringify([realpathSync(root), url, version, claudeSession, bindings])).digest('hex');
+}
+// Writes <dir>/.claude/settings.local.json holding `options` under our key,
+// next to `other` settings, with the modes Claude Code uses.
+export function writeProjectFile(dir, options, { other = {}, mode = 0o600, git = true } = {}) {
+  mkdirSync(pathJoin(dir, '.claude'), { recursive: true, mode: 0o700 });
+  if (git) mkdirSync(pathJoin(dir, '.git'), { recursive: true, mode: 0o700 });
+  const file = pathJoin(dir, '.claude', 'settings.local.json');
+  writeFileSync(file, JSON.stringify({ ...other, pluginConfigs: { [PLUGIN_KEY]: { options } } }, null, 2) + '\n', { mode });
+  chmodSync(file, mode);
+  return file;
+}
+// A bound project: one binding "workspace:topic:session" for `claudeSession`,
+// with a valid MAC unless `mac` is given.
+export function bindProject(dir, { url, token = tokens.bob, claudeSession, workspace = 'default', topic = '', session = 'shared-b', bindings, mac, ...rest }) {
+  mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const list = bindings ?? [`${workspace}:${topic}:${session}`];
+  return writeProjectFile(dir, { version: 1, claude_session_id: claudeSession, bindings: list, mac: mac ?? projectMac({ root: dir, url, claudeSession, bindings: list, token }) }, rest);
+}
+// The hook environment a saved credential gives: broker_url and token_file
+// only, with the token stored where join stores it for that broker and name.
+export function credentialScratch(s, url, { name = 'bob', token = tokens.bob } = {}) {
+  const file = credentialPath(url, name, { env: { HOME: s.home } });
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 }); writeFileSync(file, token, { mode: 0o600 });
+  return file;
 }

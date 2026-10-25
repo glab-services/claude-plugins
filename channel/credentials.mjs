@@ -1,5 +1,5 @@
 import { accessSync, constants, mkdirSync, lstatSync, openSync, fstatSync, readFileSync, writeFileSync, fsyncSync, closeSync, linkSync, unlinkSync } from 'node:fs';
-import { dirname, join, resolve, parse, sep, isAbsolute } from 'node:path';
+import { basename, dirname, join, resolve, parse, sep, isAbsolute } from 'node:path';
 import { realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
@@ -8,6 +8,20 @@ import { ChannelError, requireValue } from './config.mjs';
 export function credentialPath(url, user, { env = process.env, home = env.HOME || homedir() } = {}) {
   requireValue(typeof user === 'string' && /^[a-zA-Z0-9_.-]{1,128}$/.test(user) && !/\s/.test(user) && user !== 'broker', 'NAME_REQUIRED', 'Pass --name with a valid developer name other than broker.');
   return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'team-messaging', 'credentials', `${createHash('sha256').update(url).digest('hex').slice(0,16)}-${user}.token`);
+}
+// Plan project-options AM-2: the plugin options are user-editable, and a
+// cloned repo's settings.json env block can set them while they are unsaved
+// (findings U-2). A token file is therefore used only when it is exactly the
+// path join writes for this normalised broker URL and the name in its
+// basename, checked before anything is read or sent. A repo-chosen URL can
+// then only reach a credential the user minted for that same URL. Returns the
+// name; hand-named token files are refused on purpose.
+export function credentialName(url, path, { env = process.env, home } = {}) {
+  const name = typeof path === 'string' ? /^[0-9a-f]{16}-([a-zA-Z0-9_.-]{1,128})\.token$/.exec(basename(path))?.[1] : undefined;
+  let expected;
+  try { if (name !== undefined) expected = credentialPath(url, name, { env, ...(home ? { home } : {}) }); } catch {}
+  requireValue(expected !== undefined && expected === path, 'TOKEN_FILE_MISMATCH', 'The token file is not the credential join saved for this broker URL; run /team-messaging:join or /team-messaging:bind again.');
+  return name;
 }
 // Decision 146, narrowed by decision 149: a directory no other non-root user
 // can traverse (a real directory of our own uid with no group or world bits)
