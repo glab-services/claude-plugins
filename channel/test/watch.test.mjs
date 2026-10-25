@@ -6,15 +6,20 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join as pathJoin } from 'node:path';
-import { brokerFixture, tokens, eventually, pluginScratch, runChannel, umaskPluginData } from './helpers.mjs';
+import { brokerFixture, tokens, eventually, pluginScratch, runChannel, umaskPluginData, credentialScratch } from './helpers.mjs';
+import { writeSessionRecord } from '../project-options.mjs';
 import { acquireLock, reported, stateDir } from '../watch-state.mjs';
 import { HOOK_TIMEOUT_S, REWAKE_DEADLINE_S } from '../watch.mjs';
 import { join } from '../cli.mjs';
 
 const stopInput = key => JSON.stringify({ hook_event_name: 'Stop', session_id: key, stop_hook_active: false });
 const startInput = key => JSON.stringify({ hook_event_name: 'SessionStart', session_id: key, source: 'resume' });
-const bash = (s, f, key, extra = [], env = {}) => runChannel('watch.mjs', ['--mode', 'bash', '--session-key', key, '--data-dir', s.data, '--poll-s', '1', ...extra], s.env(f, env));
-const rewake = (s, f, key, extra = [], env = {}) => runChannel('watch.mjs', ['--mode', 'rewake', '--data-dir', s.data, '--poll-s', '1', ...extra], s.env(f, env), stopInput(key));
+// Plan project-options: the rewake watcher is a hook (CLAUDE_PLUGIN_OPTION_*,
+// --project-dir); the Bash watcher gets TM_* and --claude-session, and finds
+// its project through the SessionStart record. `binding` names the project
+// file's binding for Claude session `key`.
+const bash = (s, f, key, extra = [], env = {}, binding) => runChannel('watch.mjs', ['--mode', 'bash', '--session-key', key, ...s.bash(f, key, binding), '--data-dir', s.data, '--poll-s', '1', ...extra], s.tmEnv(f, env));
+const rewake = (s, f, key, extra = [], env = {}, binding) => runChannel('watch.mjs', ['--mode', 'rewake', ...s.hook(f, key, binding), '--poll-s', '1', ...extra], s.env(f, env), stopInput(key));
 const secretFree = (text, secrets) => { for (const secret of secrets) assert.ok(!text.includes(secret), 'a secret or message body reached watcher output'); };
 const noAck = f => assert.equal(f.requests.filter(r => r.path.startsWith('/ack')).length, 0, 'watchers never call /ack');
 async function pending(t, bodies = ['first body SENTINEL-BODY-1']) {
@@ -38,7 +43,7 @@ test('a topic message line carries its topic label', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' });
   topicHeartbeat(f.broker, 'alice', 'a');
   const sent = f.broker.send('alice', 'a', { to: `topic:${FIXTURE_TOPIC}`, body: 'topic body', kind: 'question' });
-  const s = pluginScratch(t), r = await bash(s, f, 'topic-key', [], { CLAUDE_PLUGIN_OPTION_TOPIC: FIXTURE_TOPIC }).result;
+  const s = pluginScratch(t), r = await bash(s, f, 'topic-key', [], {}, { topic: FIXTURE_TOPIC }).result;
   assert.equal(r.stdout, `team-message id=${sent.id} thread=${sent.thread_id} from=alice kind=question topic=${FIXTURE_TOPIC}\n`);
   noAck(f);
 });
@@ -91,26 +96,26 @@ async function revoked(t) {
   const { code } = await response.json();
   const joined = await join({ url: f.url, code, name: 'newbie', client: 'none' }, { env: { HOME: s.home } });
   const token = readFileSync(joined.credential_path, 'utf8');
-  const env = { CLAUDE_PLUGIN_OPTION_TOKEN_FILE: joined.credential_path, CLAUDE_PLUGIN_OPTION_TOPIC: FIXTURE_TOPIC, CLAUDE_PLUGIN_OPTION_SESSION_ID: 'newbie-s' };
+  const env = { CLAUDE_PLUGIN_OPTION_TOKEN_FILE: joined.credential_path }, tmEnv = { TM_TOKEN_FILE: joined.credential_path }, binding = { topic: FIXTURE_TOPIC, session: 'newbie-s', token };
   const revoke = await fetch(f.url + '/credentials/revoke', { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: '{}' });
   assert.equal(revoke.status, 200);
-  return { f, s, env, secrets: [token, code] };
+  return { f, s, env, tmEnv, binding, token, secrets: [token, code] };
 }
 
 test('a revoked minted credential wakes once with its terminal code, then stays silent', async t => {
-  const { f, s, env, secrets } = await revoked(t);
-  const first = await rewake(s, f, 'ended', [], env).result;
+  const { f, s, env, tmEnv, binding, secrets } = await revoked(t);
+  const first = await rewake(s, f, 'ended', [], env, binding).result;
   assert.equal(first.code, 2); assert.match(first.stderr, /^team-messaging ended UNAUTHORIZED: /);
-  const second = await rewake(s, f, 'ended', [], env).result;
+  const second = await rewake(s, f, 'ended', [], env, binding).result;
   assert.equal(second.code, 0); assert.equal(second.stderr, '');
-  const manual = await bash(s, f, 'ended', [], env).result;
+  const manual = await bash(s, f, 'ended', [], tmEnv, binding).result;
   assert.equal(manual.code, 4); assert.equal(manual.stdout, 'WATCH_ENDED UNAUTHORIZED\n');
   secretFree(first.stderr + second.stderr + manual.stdout + manual.stderr, secrets);
   noAck(f);
 });
 
 test('the watcher lock is released after a thrown error', async t => {
-  const { f, s, env } = await revoked(t);
+  const { f, s, binding, token } = await revoked(t);
   const dir = stateDir(s.data, { home: s.home }), stateLock = pathJoin(dir, 'thrown.state.lock'), watchLock = pathJoin(dir, 'thrown.watch.lock');
   // A proxy delays each request by 1 s, so the state lock can be held as a
   // live process once the watcher owns its lock: markEnded then times out
@@ -121,7 +126,9 @@ test('the watcher lock is released after a thrown error', async t => {
   }, 1000));
   await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
   t.after(() => { proxy.closeAllConnections(); return new Promise(resolve => proxy.close(resolve)); });
-  const run = runChannel('watch.mjs', ['--mode', 'rewake', '--data-dir', s.data, '--poll-s', '1'], s.env({ url: `http://127.0.0.1:${proxy.address().port}` }, env), stopInput('thrown'));
+  // AM-2: the token is used only from the join path for the URL in use.
+  const via = { url: `http://127.0.0.1:${proxy.address().port}` }, tokenFile = credentialScratch(s, via.url, { name: 'newbie', token });
+  const run = runChannel('watch.mjs', ['--mode', 'rewake', ...s.hook(via, 'thrown', binding), '--poll-s', '1'], s.env(via, { CLAUDE_PLUGIN_OPTION_TOKEN_FILE: tokenFile }), stopInput('thrown'));
   await eventually(() => existsSync(watchLock), 4000);
   const hold = setInterval(() => writeFileSync(stateLock, JSON.stringify({ pid: process.pid, created: Date.now() }), { mode: 0o600 }), 200);
   writeFileSync(stateLock, JSON.stringify({ pid: process.pid, created: Date.now() }), { mode: 0o600 });
@@ -156,13 +163,20 @@ test('broker errors back off exponentially instead of polling at a fixed interva
   }
 });
 
-test('an unconfigured watcher exits 5 in bash mode and silently in rewake mode, like arm=off', async t => {
-  const s = pluginScratch(t), f = { url: 'http://127.0.0.1:9' };
-  const manual = await bash(s, f, 'k', [], { CLAUDE_PLUGIN_OPTION_SESSION_ID: '' }).result;
-  assert.equal(manual.code, 5); assert.equal(JSON.parse(manual.stderr).error, 'NOT_CONFIGURED');
-  for (const env of [{ CLAUDE_PLUGIN_OPTION_SESSION_ID: '' }, { CLAUDE_PLUGIN_OPTION_ARM: 'off' }]) {
-    const quiet = await rewake(s, f, 'k', [], env).result;
-    assert.deepEqual([quiet.code, quiet.stdout, quiet.stderr], [0, '', '']);
+// Plan project-options P-11: an unbound project is the old "unconfigured",
+// and a non-agent session is inert; the rewake watcher is silent in both.
+test('an unbound watcher exits 5 in bash mode and silently in rewake mode, like arm=off and a non-agent session', async t => {
+  const s = pluginScratch(t), f = { url: 'http://127.0.0.1:9' }, unbound = s.unbound();
+  writeSessionRecord(s.data, 'k', unbound, { home: s.home });
+  const manual = await runChannel('watch.mjs', ['--mode', 'bash', '--session-key', 'k', '--claude-session', 'k', '--data-dir', s.data], s.tmEnv(f)).result;
+  assert.equal(manual.code, 5); assert.equal(JSON.parse(manual.stderr).error, 'PROJECT_NOT_BOUND');
+  writeSessionRecord(s.data, 'k2', s.project(f, 'the-agent'), { home: s.home });
+  const inert = await runChannel('watch.mjs', ['--mode', 'bash', '--session-key', 'k2', '--claude-session', 'k2', '--data-dir', s.data], s.tmEnv(f)).result;
+  assert.equal(inert.code, 5, 'the bash watcher names its refusal'); assert.equal(JSON.parse(inert.stderr).error, 'NOT_AGENT_SESSION');
+  for (const args of [['--project-dir', unbound, '--data-dir', s.data], [...s.hook(f, 'k'), '--claude-session', 'not-the-agent'], s.hook(f, 'k')]) {
+    const env = args.includes('not-the-agent') || args.includes(unbound) ? s.env(f) : s.env(f, { CLAUDE_PLUGIN_OPTION_ARM: 'off' });
+    const quiet = await runChannel('watch.mjs', ['--mode', 'rewake', ...args], env, stopInput('k')).result;
+    assert.deepEqual([quiet.code, quiet.stdout, quiet.stderr], [0, '', ''], JSON.stringify(args));
   }
 });
 
@@ -196,7 +210,7 @@ test('invalid arguments, a missing session key and unreadable hook input fail wi
   assert.equal(JSON.parse(repeated.stderr).error, 'INVALID_WATCH_ARGS');
   const slow = await runChannel('watch.mjs', ['--mode', 'bash', '--poll-s', '0.5'], s.env(f)).result;
   assert.equal(JSON.parse(slow.stderr).error, 'INVALID_WATCH_ARGS', '--poll-s is at least 1');
-  const keyless = await runChannel('watch.mjs', ['--mode', 'bash', '--data-dir', s.data], s.env(f)).result;
+  const keyless = await runChannel('watch.mjs', ['--mode', 'bash', ...s.bash(f, 'no-key'), '--data-dir', s.data], s.tmEnv(f)).result;
   assert.equal(keyless.code, 5); assert.equal(JSON.parse(keyless.stderr).error, 'INVALID_SESSION_KEY');
   const garbled = await runChannel('watch.mjs', ['--mode', 'rewake', '--data-dir', s.data], s.env(f), 'not json').result;
   assert.equal(garbled.code, 0); assert.deepEqual(JSON.parse(garbled.stderr), { event: 'watch_unavailable', error: 'WATCH_FAILED', hint: 'Check the plugin binding and broker availability.' });
@@ -249,7 +263,7 @@ test('a rewake watcher whose parent exits stops polling, releases its lock and w
   const out = pathJoin(s.dir, 'orphan.out');
   const parent = `const { spawn } = require('node:child_process'), fs = require('node:fs');
     const fd = fs.openSync(${JSON.stringify(out)}, 'w');
-    const child = spawn(process.execPath, ${JSON.stringify([fileURLToPath(new URL('../watch.mjs', import.meta.url)), '--mode', 'rewake', '--data-dir', s.data, '--poll-s', '1', '--deadline-s', '30'])}, { env: ${JSON.stringify(s.env(f))}, stdio: ['pipe', fd, fd] });
+    const child = spawn(process.execPath, ${JSON.stringify([fileURLToPath(new URL('../watch.mjs', import.meta.url)), '--mode', 'rewake', ...s.hook(f, 'orphan'), '--poll-s', '1', '--deadline-s', '30'])}, { env: ${JSON.stringify(s.env(f))}, stdio: ['pipe', fd, fd] });
     child.stdin.end(${JSON.stringify(JSON.stringify({ hook_event_name: 'Stop', session_id: 'orphan' }))});
     console.log(child.pid); setTimeout(() => process.exit(0), 700);`;
   const launcher = spawn(process.execPath, ['-e', parent], { stdio: ['ignore', 'pipe', 'inherit'] });
@@ -288,7 +302,7 @@ test('the rewake watcher refuses a 0777 plugin data dir below a 0755 HOME and do
 
 // Decision 150: SessionStart starts the rewake watcher too. It reads the same
 // session_id from its hook input, so it shares the Stop watcher's lock.
-const startWatcher = (s, f, key, extra = []) => runChannel('watch.mjs', ['--mode', 'rewake', '--data-dir', s.data, '--poll-s', '1', ...extra], s.env(f), startInput(key));
+const startWatcher = (s, f, key, extra = []) => runChannel('watch.mjs', ['--mode', 'rewake', ...s.hook(f, key), '--poll-s', '1', ...extra], s.env(f), startInput(key));
 
 test('a SessionStart watcher with messages already pending wakes at once, after one inbox poll', async t => {
   const { f, sent } = await pending(t), s = pluginScratch(t);
@@ -337,7 +351,7 @@ const watcherArgv = (afterClaim, args) => afterClaim ? ['--input-type=module', '
 function host(t, s, f, key, log, extra = [], afterClaim) {
   const source = `import { spawn } from 'node:child_process'; import { openSync } from 'node:fs';
     const out = openSync(${JSON.stringify(log)}, 'a');
-    const child = spawn(process.execPath, ${JSON.stringify(watcherArgv(afterClaim, ['--mode', 'rewake', '--session-key', key, '--data-dir', s.data, ...extra]))}, { stdio: ['ignore', out, out] });
+    const child = spawn(process.execPath, ${JSON.stringify(watcherArgv(afterClaim, ['--mode', 'rewake', '--session-key', key, '--claude-session', key, ...s.hook(f, key), ...extra]))}, { stdio: ['ignore', out, out] });
     console.log(child.pid); setInterval(() => {}, 1000);`;
   const proc = spawn(process.execPath, ['--input-type=module', '--eval', source], { env: s.env(f), stdio: ['ignore', 'pipe', 'inherit'] });
   t.after(() => { try { proc.kill('SIGKILL'); } catch {} });
@@ -464,7 +478,7 @@ test('a never-resolving afterClaim still ends at the deadline and on SIGTERM, re
   noAck(f);
 });
 function runInProcess(s, f, key, afterClaim, args) {
-  const child = spawn(process.execPath, watcherArgv(afterClaim, ['--mode', 'rewake', '--session-key', key, '--data-dir', s.data, '--poll-s', '1', ...args]), { env: s.env(f), stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, watcherArgv(afterClaim, ['--mode', 'rewake', '--session-key', key, '--claude-session', key, ...s.hook(f, key), '--poll-s', '1', ...args]), { env: s.env(f), stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '', stderr = ''; const started = Date.now();
   child.stdout.on('data', c => { stdout += c; }); child.stderr.on('data', c => { stderr += c; });
   return { child, result: new Promise((resolve, reject) => { child.once('error', reject); child.once('close', code => resolve({ code, stdout, stderr, ms: Date.now() - started })); }) };

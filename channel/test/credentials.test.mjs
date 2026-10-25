@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { chmodSync, lstatSync, mkdirSync, rmSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { testTempDir } from '../../test-support/temp.mjs';
-import { ensurePrivateDir, preflightCredentialDir, readCredential, writeCredential } from '../credentials.mjs';
+import { credentialName, credentialPath, ensurePrivateDir, preflightCredentialDir, readCredential, writeCredential } from '../credentials.mjs';
 
 // Every case is built with mkdir/chmod on the real filesystem. The scratch
 // root sits below the private $TMPDIR, so each case makes its own HOME the
@@ -64,4 +64,14 @@ test('the chmod hint single-quotes the path and escapes a quote inside it', t =>
   const s = scratch(t, 0o755), odd = s.dir("it's here", 0o777);
   assert.throws(() => ensurePrivateDir(join(odd, 'state'), { home: s.home }),
     { code: 'INSECURE_CREDENTIAL_DIR', hint: `${odd} is group- or world-writable; run chmod go-w '${s.home}/it'\\''s here'` });
+});
+
+// Plan project-options AM-2: only the exact join path for this URL and name.
+test('credentialName accepts only the join path for this broker URL and returns its name', () => {
+  const env = { HOME: '/home/u' }, url = 'https://broker.example', path = credentialPath(url, 'bob', { env });
+  assert.equal(credentialName(url, path, { env }), 'bob');
+  assert.equal(credentialName(url, credentialPath(url, 'bob', { env: { HOME: '/h', XDG_CONFIG_HOME: '/x' } }), { env: { HOME: '/h', XDG_CONFIG_HOME: '/x' } }), 'bob');
+  for (const [candidate, otherUrl] of [[path, 'https://attacker.example'], [path.replace('/home/u/', '/home/v/'), url], ['/home/u/.config/team-messaging/credentials/plugin.token', url],
+    [credentialPath(url, 'bob', { env }).replace('-bob.token', '-broker.token'), url], [path + '.bak', url], [undefined, url], ['', url], [path.replace(/[0-9a-f]{16}-/, '0000000000000000-'), url]])
+    assert.throws(() => credentialName(otherUrl, candidate, { env }), { code: 'TOKEN_FILE_MISMATCH' }, String(candidate));
 });

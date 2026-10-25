@@ -1,7 +1,7 @@
 import { topicHeartbeat } from '../../test-support/topic-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import { accessSync, constants, existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,12 +51,19 @@ test('the build succeeds, validates and refuses unsafe output directories', t =>
 // its first turn to end. The built bundle is checked, not the source.
 test('SessionStart arms the rewake watcher with the Stop watcher\'s command and timeout', () => {
   const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks;
-  const watcher = { type: 'command', command: 'node', args: ['--use-system-ca', '${CLAUDE_PLUGIN_ROOT}/runtime/channel/watch.mjs', '--mode', 'rewake', '--data-dir', '${CLAUDE_PLUGIN_DATA}'], asyncRewake: true, timeout: HOOK_TIMEOUT_S };
+  const watcher = { type: 'command', command: 'node', args: ['--use-system-ca', '${CLAUDE_PLUGIN_ROOT}/runtime/channel/watch.mjs', '--mode', 'rewake', '--data-dir', '${CLAUDE_PLUGIN_DATA}', '--project-dir', '${CLAUDE_PROJECT_DIR}'], asyncRewake: true, timeout: HOOK_TIMEOUT_S };
   assert.equal(hooks.SessionStart.length, 1);
   assert.equal(hooks.SessionStart[0].matcher, 'startup|resume|clear|compact');
   assert.deepEqual(hooks.SessionStart[0].hooks.filter(hook => hook.args.some(arg => arg.endsWith('/watch.mjs'))), [watcher]);
   assert.deepEqual(hooks.Stop[0].hooks.filter(hook => hook.args.some(arg => arg.endsWith('/watch.mjs'))), [watcher], 'same entry as the Stop watcher');
   assert.deepEqual(hooks.SessionStart[0].hooks.map(hook => hook.args[1].split('/').pop()), ['plugin-session-start.mjs', 'watch.mjs']);
+  // Plan project-options AM-1: an exec-form ${user_config.x} with no saved
+  // value stops the hook from running (findings 0.3), so hooks.json passes
+  // only the project and data directories and reads options from env.
+  assert.ok(!readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8').includes('${user_config.'), 'no ${user_config.*} in hooks.json');
+  for (const hook of Object.values(hooks).flat().flatMap(entry => entry.hooks)) for (const arg of hook.args.filter(value => value.includes('${')))
+    assert.ok(arg.startsWith('${CLAUDE_PLUGIN_ROOT}/runtime/') || ['${CLAUDE_PROJECT_DIR}', '${CLAUDE_PLUGIN_DATA}'].includes(arg), arg);
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(plugin, '.mcp.json'), 'utf8')).mcpServers['team-messaging'].env), ['TM_BROKER_URL', 'TM_TOKEN_FILE', 'TM_MODE', 'TM_ARM']);
 });
 
 test('every path the manifests and skills name exists, and no runtime import leaves the plugin root', () => {
@@ -93,8 +100,9 @@ function bundled(f, s, env) {
 
 test('the bundled MCP server answers over stdio in poll mode with plugin hints', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
-  // The .mcp.json shape: TM_* from ${user_config.*}, with an unset topic and mode as "".
-  const env = { HOME: s.home, TM_BROKER_URL: f.url, TM_TOKEN_FILE: s.tokenFile, TM_WORKSPACE: 'default', TM_TOPIC: '', TM_SESSION_ID: 'bundled-b', TM_MODE: '', TM_ARM: 'rewake', BROKER_TOKEN: 'tmc_' + 'd'.repeat(32) + '_' + 'P'.repeat(43) };
+  // The .mcp.json shape: four TM_* from ${user_config.*}, with an unset mode
+  // as "". The binding comes from the project file of the agent session.
+  const env = { ...s.tmEnv(f), TM_MODE: '', TM_ARM: 'rewake', CLAUDE_CODE_SESSION_ID: 'bundled-agent', CLAUDE_PROJECT_DIR: s.project(f, 'bundled-agent', { session: 'bundled-b' }), BROKER_TOKEN: 'tmc_' + 'd'.repeat(32) + '_' + 'P'.repeat(43) };
   const b = bundled(f, s, env);
   await b.connect();
   const tools = (await b.client.listTools()).tools.map(tool => tool.name);
@@ -116,12 +124,15 @@ test('the bundled MCP server answers over stdio in poll mode with plugin hints',
   assert.ok(!b.logs.join('').includes(env.BROKER_TOKEN) && !b.logs.join('').includes(tokens.bob));
 });
 
-test('an unconfigured bundled server exits 1 with PLUGIN_NOT_CONFIGURED and no secret', async t => {
-  const sentinel = 'tmc_' + 'c'.repeat(32) + '_' + 'Q'.repeat(43);
-  const child = spawn(process.execPath, [join(plugin, 'runtime', 'channel', 'plugin-main.mjs')], { env: { TM_BROKER_URL: '', TM_TOKEN_FILE: '', TM_WORKSPACE: '', TM_TOPIC: '', TM_SESSION_ID: '', TM_MODE: 'poll', TM_ARM: 'rewake', BROKER_TOKEN: sentinel }, stdio: ['ignore', 'pipe', 'pipe'] });
-  let output = ''; child.stdout.on('data', c => { output += c; }); child.stderr.on('data', c => { output += c; });
-  const code = await new Promise(resolve => child.once('close', resolve));
-  assert.equal(code, 1);
-  assert.deepEqual(JSON.parse(output), { error: 'PLUGIN_NOT_CONFIGURED', hint: 'Run /team-messaging:join or /team-messaging:bind, then restart Claude Code.' });
-  assert.ok(!output.includes(sentinel));
+// Plan project-options P-10: an unbound project no longer exits 1. The
+// bundled server serves no tools, refuses every call and exits with stdin.
+test('an unbound bundled server serves no tools, refuses calls with PROJECT_NOT_BOUND and prints no secret', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), sentinel = 'tmc_' + 'c'.repeat(32) + '_' + 'Q'.repeat(43);
+  const b = bundled(f, s, { HOME: s.home, TM_BROKER_URL: '', TM_TOKEN_FILE: '', TM_MODE: 'poll', TM_ARM: 'rewake', CLAUDE_CODE_SESSION_ID: 'any', CLAUDE_PROJECT_DIR: s.unbound(), BROKER_TOKEN: sentinel });
+  await b.connect();
+  assert.deepEqual((await b.client.listTools()).tools, []);
+  const refused = await b.client.callTool({ name: 'inbox', arguments: {} });
+  assert.equal(refused.isError, true); assert.equal(refused.structuredContent.error, 'PROJECT_NOT_BOUND');
+  assert.deepEqual(b.logs.join('').trim().split('\n').map(line => JSON.parse(line)), [{ event: 'plugin_inert', state: 'idle' }]);
+  assert.ok(!b.logs.join('').includes(sentinel)); assert.deepEqual(f.requests, []);
 });

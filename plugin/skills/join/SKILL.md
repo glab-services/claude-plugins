@@ -1,6 +1,6 @@
 ---
 name: join
-description: Join a team-messaging workspace topic with an invite code the user saved in a private file, and bind this plugin to it.
+description: Join a team-messaging workspace topic with an invite code the user saved in a private file, and bind this project to it with this Claude session as its agent session.
 argument-hint: "[broker-url] [name] [invite-file]"
 ---
 
@@ -8,22 +8,24 @@ argument-hint: "[broker-url] [name] [invite-file]"
 
 Arguments, if given: $ARGUMENTS
 
+Run this in the Claude session that should be this project's agent session: only that session uses the plugin in this project.
+
 1. Ask the user for whatever is missing: the broker URL (HTTPS, or http://127.0.0.1 for a broker on this machine), their developer name, and the path of a private file they created that holds only the invite code. Never ask for the code itself in the conversation.
 2. Run this exactly, with the invite file redirected to stdin:
 
    ```sh
-   team-messaging join '<broker-url>' - --name '<name>' --client claude-plugin < '<invite-file>'
+   team-messaging join '<broker-url>' - --name '<name>' --client claude-plugin --claude-session '${CLAUDE_SESSION_ID}' --data-dir '${CLAUDE_PLUGIN_DATA}' < '<invite-file>'
    ```
 
-   Never `cat`, `echo` or print the invite file, and never pass the code as an argument. The command saves a mode-0600 credential and writes only its path to the plugin configuration.
+   Never `cat`, `echo` or print the invite file, and never pass the code as an argument. The command saves a mode-0600 credential, writes only its path to the plugin configuration, and records this session as the project's agent in `.claude/settings.local.json`.
 3. Read the JSON result. `adapters[0].status` is:
-   - `registered`: tell the user to delete the invite file, then restart Claude Code to load the binding.
-   - `skipped`: the same binding was written to the plugin while this join ran, for example by another session; ask the user to delete the invite file. Running join again on a plugin that is already bound, `ALREADY_MEMBER` included, does not give `skipped`: it stops with `PLUGIN_ALREADY_BOUND` (step 4).
-   - `conflict` or `manual`: show the `hint` and stop. Nothing was overwritten. At this point the invite was already used, so once the plugin is fixed, use `/team-messaging:bind` instead of joining again.
+   - `registered`: tell the user to delete the invite file, then relay the `hint`: reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect), or restart with `claude --continue` when the credential was just saved.
+   - `conflict`, `failed` or `manual`: show the `hint` and stop. At this point the invite was already used; once the plugin is fixed, ask the owner for a new invite.
    If `legacy_registration` is present, relay its hint: an older MCP registration for the same binding would run a second channel.
-4. An error comes back as `{error, hint}` on stderr; show the hint. Before using the invite, the command checks the plugin, and two errors come from that check. In both cases the invite was not used:
-   - `PLUGIN_ALREADY_BOUND`: the plugin already holds a binding, for the workspace and topic named in the hint, and the hint says whether that session is live or has ended. If it is live and the invite is for that same binding, nothing is needed; ask the user to delete the invite file. Otherwise, including every ended binding, the user resets the plugin (uninstall it, then install it again) and runs this skill again with the same invite file.
+4. An error comes back as `{error, hint}` on stderr; show the hint. Before using the invite, the command checks the project and the plugin; for these errors the invite was not used:
+   - `PLUGIN_ALREADY_BOUND`: this project is already bound (the hint names the file and its agent session), or the plugin's saved credential is for another broker or name. Ask the user to delete the invite file if the project is already bound as intended.
    - `PLUGIN_NOT_READY`: the plugin is not installed, or its configuration could not be read. The user installs the plugin or fixes its configuration, then runs this skill again.
+   - `PROJECT_OPTIONS_UNTRUSTED`, `PROJECT_OPTIONS_INVALID` or `PROJECT_UNKNOWN`: show the hint; the project file must be fixed, or Claude Code restarted in the project, first.
    Broker errors such as `INVITE_EXPIRED` or `INSECURE_BROKER_URL` come back the same way.
 
-The plugin polls by default and wakes the session through its Stop hook (`arm=rewake`). Changing `arm` (rewake, bash or off) with `claude plugin configure` needs a Claude Code restart.
+The plugin polls by default and wakes the agent session through its Stop hook (`arm=rewake`). Changing `arm` (rewake, bash or off) with `claude plugin configure` needs a Claude Code restart.

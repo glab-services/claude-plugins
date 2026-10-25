@@ -8,7 +8,7 @@ import { brokerFixture, tokens, pluginScratch, runChannel, umaskPluginData } fro
 import { reported, stateDir } from '../watch-state.mjs';
 
 const input = (key, active = false) => JSON.stringify({ hook_event_name: 'Stop', session_id: key, stop_hook_active: active });
-const stop = (s, f, key, { active = false, env = {} } = {}) => runChannel('stop-hook.mjs', [], s.env(f, env), input(key, active));
+const stop = (s, f, key, { active = false, env = {}, args = s.hook(f, key) } = {}) => runChannel('stop-hook.mjs', args, s.env(f, env), input(key, active));
 const noAck = f => assert.equal(f.requests.filter(r => r.path.startsWith('/ack')).length, 0, 'the Stop hook never calls /ack');
 async function pending(t, count = 2) {
   const f = await brokerFixture(t, { defaultOwner: 'bob' });
@@ -30,9 +30,12 @@ test('pending messages block the stop once, naming exactly their IDs, without ac
   noAck(f);
 });
 
-test('stop_hook_active, arm=off and an unconfigured plugin never block', async t => {
+// Plan project-options P-11: an unbound project (idle) and a non-agent
+// session (inert) are silent at Stop as well.
+test('stop_hook_active, arm=off, an unbound project and a non-agent session never block', async t => {
   const { f } = await pending(t), s = pluginScratch(t);
-  for (const [key, options] of [['active', { active: true }], ['off', { env: { CLAUDE_PLUGIN_OPTION_ARM: 'off' } }], ['unset', { env: { CLAUDE_PLUGIN_OPTION_BROKER_URL: '' } }]]) {
+  for (const [key, options] of [['active', { active: true }], ['off', { env: { CLAUDE_PLUGIN_OPTION_ARM: 'off' } }], ['unset', { args: ['--project-dir', s.unbound(), '--data-dir', s.data] }],
+    ['inert', { args: s.hook(f, 'the-agent') }]]) {
     const result = await stop(s, f, key, options).result;
     assert.deepEqual([result.code, result.stdout, result.stderr], [0, '', ''], key);
   }
@@ -88,7 +91,7 @@ test('a Stop hook and a rewake watcher racing on one message deliver it exactly 
   for (let batch = 0; batch < 4; batch++) await Promise.all(Array.from({ length: 5 }, async (_, n) => {
     const round = batch * 5 + n, key = `race-${round}`;
     const [hook, watcher] = await Promise.all([stop(s, f, key).result,
-      runChannel('watch.mjs', ['--mode', 'rewake', '--data-dir', s.data, '--poll-s', '1', '--deadline-s', '1'], s.env(f), input(key)).result]);
+      runChannel('watch.mjs', ['--mode', 'rewake', ...s.hook(f, key), '--poll-s', '1', '--deadline-s', '1'], s.env(f), input(key)).result]);
     const deliveries = (hook.stdout === block([sent[0].id]) ? 1 : 0) + (watcher.code === 2 && watcher.stderr.includes(`id=${sent[0].id} `) ? 1 : 0);
     assert.equal(deliveries, 1, `round ${round}: hook=${JSON.stringify(hook.stdout)} watcher=${watcher.code}`);
   }));

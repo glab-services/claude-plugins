@@ -2,9 +2,9 @@
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { requireValue } from './config.mjs';
-import { directoryProblem, localError, pluginEnv } from './plugin-env.mjs';
+import { directoryProblem, hookArgs, localError, resolveBinding } from './plugin-env.mjs';
+import { CLAUDE_SESSION, writeSessionRecord } from './project-options.mjs';
 import { sessionStartOutput } from './session-start.mjs';
-import { stateDir } from './watch-state.mjs';
 
 const FETCH_DEADLINE_MS = 10000;
 const ARM_TEXT = {
@@ -12,9 +12,15 @@ const ARM_TEXT = {
   bash: 'Team messages arrive through a background watcher (arm=bash): run the /team-messaging:watch skill now and again after each watcher exit.',
   off: '',
 };
-const NOT_CONFIGURED = 'The team-messaging plugin is not configured. A member with an invite file runs /team-messaging:join; a workspace owner runs /team-messaging:bind. Then restart Claude Code.';
+// Plan project-options P-11: at most one line about the project's binding.
+// Only names that passed their patterns are echoed.
+const IDLE = 'team-messaging is idle in this project; run /team-messaging:bind or /team-messaging:join in the session that should be the agent';
+// P-15: a 0.9 global binding is ignored; its workspace only words the hint.
+const ADOPT = workspace => ` (the plugin still holds a 0.9 binding to workspace ${workspace}, which 0.10 ignores; to keep it, run /team-messaging:bind --adopt-global in the agent session)`;
+const INERT = agent => `team-messaging: this project's agent is Claude session ${CLAUDE_SESSION.test(agent ?? '') ? agent : '(unknown)'}; run /team-messaging:claim here to take over`;
+const ACTIVE = ({ binding, root }) => `team-messaging: agent session for workspace ${binding.workspace}${binding.topic === null ? '' : `, topic ${binding.topic}`}, project root ${root}`;
 
-async function pluginSessionStart(env = process.env) {
+async function pluginSessionStart(env = process.env, argv = process.argv.slice(2)) {
   let event, context = null, timer;
   try {
     const inputLimit = Number(env.HOOK_INPUT_MAX_BYTES ?? 65536);
@@ -26,12 +32,21 @@ async function pluginSessionStart(env = process.env) {
     }
     event = JSON.parse(input);
   } catch (error) { return fail(error); }
-  const plugin = pluginEnv(env);
-  if (!plugin.configured) return write(NOT_CONFIGURED);
+  let args;
+  try { args = hookArgs(argv, env); } catch (error) { const safe = fail(error); return write(`team-messaging: ${safe.code}: ${safe.hint}`); }
+  const plugin = resolveBinding({ options: args.options, claudeSession: event?.session_id, projectDir: args.projectDir, env });
+  // P-11: the record is written in every state, so the CLI and the Bash
+  // watcher of this session can find the project later. Writing it also
+  // checks the state directory: an unusable one is reported in the context
+  // (decision 148). This hook marks nothing reported (decision 154).
+  let problem = null;
+  try { writeSessionRecord(args.dataDir, event?.session_id, args.projectDir, { home: env.HOME }); }
+  catch (error) { problem = directoryProblem(fail(error)); }
+  if (plugin.state === 'idle') return write([problem, IDLE + (/^[A-Za-z0-9_.-]{1,128}$/.test(args.options.workspace) ? ADOPT(args.options.workspace) : '')].filter(Boolean).join('\n\n'));
+  if (plugin.state === 'inert') return write([problem, INERT(plugin.agent)].filter(Boolean).join('\n\n'));
+  if (plugin.state === 'invalid') return write([problem, `team-messaging: ${plugin.code}: ${plugin.hint}`].filter(Boolean).join('\n\n'));
+  if (problem) return write([problem, ACTIVE(plugin), ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
   try {
-    // Called only for its check: an unusable state directory is reported in
-    // the context (decision 148). This hook marks nothing reported (decision 154).
-    stateDir(env.CLAUDE_PLUGIN_DATA, { home: env.HOME });
     // The deadline bounds only the fetch; past it the hook still starts the
     // session with its arm text and no messages.
     const fetched = await Promise.race([
@@ -47,7 +62,7 @@ async function pluginSessionStart(env = process.env) {
     // at startup is in the context and also wakes once; ack dedupes that.
     context = fetched.additionalContext;
   } catch (error) { clearTimeout(timer); context = directoryProblem(fail(error)); }
-  write([context, ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
+  write([context, ACTIVE(plugin), ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
 }
 function write(text) {
   if (text) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n');

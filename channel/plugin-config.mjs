@@ -1,10 +1,12 @@
 import { spawnSync } from 'node:child_process';
-import { available, pinnedSession, serverName } from './register.mjs';
+import { available, serverName } from './register.mjs';
 import { readClaudeRegistration } from './client-config.mjs';
 import { ChannelError } from './config.mjs';
 import { unsafeOption } from './plugin-env.mjs';
 
-export const PLUGIN_ID = 'team-messaging@team-messaging-local';
+import { PLUGIN_ID } from './project-options.mjs';
+
+export { PLUGIN_ID };
 const keys = ['broker_url', 'token_file', 'workspace', 'topic', 'session_id', 'mode', 'arm'];
 const run = (spawn, env, args, input) => {
   // Token variables never reach the client CLI, as register.mjs:21 does.
@@ -43,11 +45,15 @@ export function writePluginConfig(id = PLUGIN_ID, values, { spawn = spawnSync, e
   const result = run(spawn, env, ['plugin', 'configure', id, '--values-stdin'], JSON.stringify(Object.fromEntries(keys.map(key => [key, values[key]]))));
   return result.error?.code === 'ENOENT' || result.status === null ? 'manual' : result.status === 0 ? 'registered' : 'failed';
 }
-// Statuses mirror register.mjs: registered, skipped (same active binding),
-// conflict (another binding or unverifiable), manual (no claude CLI or plugin).
-export async function pluginAdapter({ url, workspace, topic, path, session }, { spawn = spawnSync, env = process.env, probe, cwd = process.cwd() } = {}) {
+// Plan project-options P-12, P-13: the global options hold only the
+// credential (broker_url and token_file, with mode and arm); the binding
+// lives in the project file. Statuses: registered (credential written),
+// skipped (this credential is already saved; a 0.9 global workspace never
+// blocks), conflict (a credential for another broker or name, or an
+// unverifiable configuration), manual (no claude CLI or plugin).
+export async function pluginAdapter({ url, workspace, topic, path }, { spawn = spawnSync, env = process.env, cwd = process.cwd() } = {}) {
   // Checked again before anything is read or saved, whatever the caller validated.
-  refuseUnsafe({ broker_url: url, token_file: path, workspace, topic: topic ?? '', session_id: session ?? '' });
+  refuseUnsafe({ broker_url: url, token_file: path });
   const name = serverName(url, workspace, topic, 'claude'), legacy = readClaudeRegistration(name, { env, cwd }).status === 0
     ? { legacy_registration: { server_name: name, hint: `An older user-scope MCP registration for this binding exists; remove it with claude mcp remove --scope user ${name} so the session does not run two channels.` } } : {};
   const result = (status, extra = {}) => ({ client: 'claude-plugin', plugin_id: PLUGIN_ID, status, ...extra, ...legacy });
@@ -55,16 +61,17 @@ export async function pluginAdapter({ url, workspace, topic, path, session }, { 
   const current = readPluginConfig(PLUGIN_ID, { spawn, env });
   if (current.status === 'missing' || current.status === 'not_installed') return result('manual', { hint: `Install the plugin (claude plugin install ${PLUGIN_ID}), then rerun this command.` });
   if (current.status !== 'ok') return result('conflict', { hint: 'The plugin configuration could not be read in a known shape; it was not modified.' });
-  const saved = current.values, bound = ['broker_url', 'token_file', 'workspace', 'session_id'].some(key => saved[key] !== '');
-  const conflict = () => result('conflict', { hint: 'The plugin is bound to another broker, credential or workspace, or its binding could not be verified. It was not modified.' });
-  if (bound) {
-    if (saved.broker_url !== url || saved.token_file !== path || saved.workspace !== workspace || saved.topic !== (topic ?? '') || !/^[A-Za-z0-9_.-]{1,128}$/.test(saved.session_id) || saved.session_id === 'broker') return conflict();
-    let status; try { status = await probe?.(saved.session_id); } catch {}
-    if (['active', 'unregistered'].includes(status?.state)) return result('skipped', { hint: 'already configured' });
-    if (status?.error !== 'SESSION_ENDED') return conflict();
+  const saved = current.values;
+  if (saved.broker_url !== '' || saved.token_file !== '') {
+    if (saved.broker_url === url && saved.token_file === path) return result('skipped', { hint: 'credential already saved' });
+    return result('conflict', { hint: 'The plugin holds a credential for another broker or name. It was not modified.' });
   }
-  const values = { broker_url: url, token_file: path, workspace, topic: topic ?? '', session_id: session ?? pinnedSession('claude-plugin', url, workspace, topic),
+  const status = writePluginConfig(PLUGIN_ID, credentialOnly({ ...saved, broker_url: url, token_file: path }), { spawn, env });
+  return result(status, status === 'registered' ? { hint: 'Restart Claude Code to apply the plugin configuration.' } : {});
+}
+// The credential-only shape (P-12, P-15): the old binding keys are written
+// as "", and an invalid saved mode or arm falls back to its default.
+export function credentialOnly(saved) {
+  return { broker_url: saved.broker_url, token_file: saved.token_file, workspace: '', topic: '', session_id: '',
     mode: ['poll', 'push'].includes(saved.mode) ? saved.mode : 'poll', arm: ['rewake', 'bash', 'off'].includes(saved.arm) ? saved.arm : 'rewake' };
-  const status = writePluginConfig(PLUGIN_ID, values, { spawn, env });
-  return result(status, status === 'registered' ? { session_id: values.session_id, hint: 'Restart Claude Code to apply the plugin configuration.' } : {});
 }
