@@ -92,16 +92,16 @@ for(const host of ['127.0.0.1','localhost','::1'])for(const client of ['cli','ch
   assert.equal(hits,0);
 });
 
-test('join stores a mode-600 token in a mode-700 directory and registers both clients without secrets in argv',async t=>{
+test('join stores a mode-600 token in a mode-700 directory and registers the Claude client without secrets in argv',async t=>{
   const f=await brokerFixture(t),s=scratch(t),code=await issue(f);
   const result=await cli(s.env,['join',f.url+'/', '-', '--name','newbie'],code+'\n');
   assert.equal(result.code,0);assert.equal(result.stderr,'');const data=JSON.parse(result.stdout);
-  assert.equal(data.user,'newbie');assert.equal(data.workspace,'default');assert.equal(data.adapters.length,2);
+  assert.equal(data.user,'newbie');assert.equal(data.workspace,'default');assert.equal(data.adapters.length,1);
   assert.ok(data.adapters.every(a=>a.status==='registered'));
   const path=credentialPath(f.url,'newbie',{env:s.env}),token=readCredential(path);
   assert.equal(data.credential_path,path);assert.equal(statSync(path).mode&0o777,0o600);assert.equal(statSync(dirname(path)).mode&0o777,0o700);
   assert.equal(readdirSync(dirname(path)).length,1);
-  const calls=s.readCalls(),adds=calls.filter(c=>c.args[1]==='add');assert.equal(adds.length,2);
+  const calls=s.readCalls(),adds=calls.filter(c=>c.args[1]==='add');assert.equal(adds.length,1);
   for(const {client,args} of adds) {
     const registration=data.adapters.find(a=>a.client===client);
     assert.ok(args.includes(registration.server_name));assert.match(registration.server_name,/^[A-Za-z0-9_-]{1,64}$/);const env=savedEnv(args);
@@ -110,8 +110,7 @@ test('join stores a mode-600 token in a mode-700 directory and registers both cl
     assert.match(env.CHANNEL_SESSION_ID,new RegExp(`^${client}-[0-9a-f]{12}-[0-9a-f]{32}$`));
     assert.ok(env.CHANNEL_SESSION_ID.length<=128);assert.equal('BROKER_TOKEN' in env,false);
     assert.equal(args[args.indexOf('--')+1],process.execPath);assert.ok(args.at(-1).endsWith('/channel/main.mjs'));
-    if(client==='codex'){assert.equal(env.CHANNEL_MODE,'poll');assert.equal(args.includes('--scope'),false);}
-    else {assert.equal(args[args.indexOf('--scope')+1],'user');assert.equal(args[args.indexOf('--transport')+1],'stdio');assert.ok(args.indexOf('--transport')>args.lastIndexOf('-e'));assert.equal(data.adapters.find(a=>a.client==='claude').hook_env.CHANNEL_SESSION_ID,env.CHANNEL_SESSION_ID);}
+    assert.equal(args[args.indexOf('--scope')+1],'user');assert.equal(args[args.indexOf('--transport')+1],'stdio');assert.ok(args.indexOf('--transport')>args.lastIndexOf('-e'));assert.equal(data.adapters.find(a=>a.client==='claude').hook_env.CHANNEL_SESSION_ID,env.CHANNEL_SESSION_ID);
   }
   secretFree(result.stdout+result.stderr+JSON.stringify(calls),[code,token]);
 });
@@ -119,7 +118,7 @@ test('join stores a mode-600 token in a mode-700 directory and registers both cl
 test('registered BROKER_TOKEN_FILE plus an explicit M11a topic completes stdio and reuses its pinned session',async t=>{
   const f=await brokerFixture(t),s=scratch(t),code=await issue(f),result=await cli(s.env,['join',f.url,'-','--name','newbie'],code);
   assert.equal(result.code,0);
-  const add=s.readCalls().find(c=>c.client==='codex'&&c.args[1]==='add'),env={...s.env,...savedEnv(add.args),CHANNEL_TOPIC:FIXTURE_TOPIC,CHANNEL_POLL_MS:'25'};
+  const add=s.readCalls().find(c=>c.client==='claude'&&c.args[1]==='add'),env={...s.env,...savedEnv(add.args),CHANNEL_MODE:'poll',CHANNEL_TOPIC:FIXTURE_TOPIC,CHANNEL_POLL_MS:'25'};
   assert.equal('BROKER_TOKEN' in env,false);
   const a=await channel(f,env),b=await channel(f,env);
   const sent=await a.call('send',{to:'user:alice',body:'from file credential'});assert.equal(sent.isError,undefined);
@@ -224,7 +223,7 @@ test('IPv6 loopback with a trailing slash joins through the real /join route',as
 
 test('selected missing or failed adapters report outcomes without losing the saved credential',async t=>{
   const f=await brokerFixture(t),s=scratch(t),code=await issue(f);
-  const missing=await cli({...s.env,PATH:''},['join',f.url,code,'--name','manual-user','--client','codex']);
+  const missing=await cli({...s.env,PATH:''},['join',f.url,code,'--name','manual-user','--client','claude']);
   assert.equal(missing.code,0);assert.equal(JSON.parse(missing.stdout).adapters[0].status,'manual');
   const file=JSON.parse(missing.stdout).credential_path;assert.equal(statSync(file).mode&0o777,0o600);
   const second=await issue(f),failed=await cli({...s.env,MCP_FAKE_FAIL:'1'},['join',f.url,'-','--name','failed-user','--client','claude'],second);
@@ -233,20 +232,31 @@ test('selected missing or failed adapters report outcomes without losing the sav
   secretFree(missing.stdout+missing.stderr+failed.stdout+failed.stderr+JSON.stringify(s.readCalls()),[code,second,readCredential(file),readCredential(path)]);
 });
 
-test('F1: dotted workspace names use collision-resistant client-safe registration names in both adapters',async t=>{
+test('join refuses --client codex as an unsupported client before using the invite',async t=>{
+  const f=await brokerFixture(t),s=scratch(t),code=await issue(f);
+  const refused=await cli(s.env,['join',f.url,'-','--name','refused-client','--client','codex'],code);
+  assert.equal(refused.code,1);assert.equal(refused.stdout,'');
+  const error=JSON.parse(refused.stderr);assert.equal(error.error,'INVALID_CLIENT');assert.equal(error.hint,'Use --client claude, claude-plugin or none.');
+  assert.equal(f.requests.filter(r=>r.path==='/join').length,0);assert.deepEqual(s.readCalls(),[]);
+  assert.throws(()=>statSync(credentialPath(f.url,'refused-client',{env:s.env})),{code:'ENOENT'});
+  const accepted=await cli(s.env,['join',f.url,'-','--name','refused-client','--client','none'],code);assert.equal(accepted.code,0);
+  secretFree(refused.stdout+refused.stderr+accepted.stdout+accepted.stderr,[code]);
+});
+
+test('F1: dotted workspace names use collision-resistant client-safe registration names in the Claude adapter',async t=>{
   const f=await brokerFixture(t),s=scratch(t);
   for(const workspace of ['a.b','a_b']) {
     await project(f,workspace);const code=await issue(f,workspace);
     const result=await cli(s.env,['join',f.url,'-','--name','newbie'],code);assert.equal(result.code,0);
   }
   const adds=s.readCalls().filter(c=>c.args[1]==='add'),names=[];
-  for(const {client,args} of adds) {
+  for(const {args} of adds) {
     const env=savedEnv(args);
-    const name=client==='claude'?args[args.indexOf('--')-1]:args[2];names.push(name);
+    const name=args[args.indexOf('--')-1];names.push(name);
     assert.ok(['a.b','a_b'].includes(env.CHANNEL_WORKSPACE));assert.equal(env.CHANNEL_TOPIC,FIXTURE_TOPIC);
     assert.match(name,/^[A-Za-z0-9_-]{1,64}$/);
   }
-  assert.equal(adds.length,4);assert.equal(new Set(names).size,4);
+  assert.equal(adds.length,2);assert.equal(new Set(names).size,2);
 });
 
 

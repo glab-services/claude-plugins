@@ -10,9 +10,9 @@ async function issue(f,topic){
  const response=await fetch(f.url+'/invites',{method:'POST',headers:{Authorization:'Bearer '+tokens.alice,'X-Session-Id':'issuer','Content-Type':'application/json'},body:JSON.stringify({topics:[topic]})});assert.equal(response.status,201);return (await response.json()).code;
 }
 const added=(s,client)=>s.readCalls().filter(c=>c.client===client&&c.args[1]==='add').at(-1);
-const nameOf=call=>call.args.includes('--transport')?call.args[call.args.indexOf('--')-1]:call.args[2];
+const nameOf=call=>call.args[call.args.indexOf('--')-1];
 
-for(const client of ['claude','codex'])test(`${client} failed replacement add returns an executable secret-free recovery command`,async t=>{
+for(const client of ['claude'])test(`${client} failed replacement add returns an executable secret-free recovery command`,async t=>{
  const {existsSync,readFileSync}=await import('node:fs'),{join}=await import('node:path'),{spawn}=await import('node:child_process');
  const f=await brokerFixture(t),s=scratch(t),topic='replacement/recovery';
  s.env.XDG_CONFIG_HOME=join(s.env.HOME,"config 'quoted'");
@@ -36,12 +36,12 @@ for(const client of ['claude','codex'])test(`${client} failed replacement add re
  assert.equal(restored.CHANNEL_TOPIC,topic);assert.equal(restored.BROKER_TOKEN_FILE,oldEnv.BROKER_TOKEN_FILE);assert.notEqual(restored.CHANNEL_SESSION_ID,oldEnv.CHANNEL_SESSION_ID);
 });
 
-for(const client of ['claude','codex'])for(const outcome of ['STATUS_UNAVAILABLE','SESSION_OWNED','SESSION_TOPIC_MISMATCH','invalid status'])test(`${client} registration preserves config after non-ended probe outcome ${outcome}`,async t=>{
+for(const client of ['claude'])for(const outcome of ['STATUS_UNAVAILABLE','SESSION_OWNED','SESSION_TOPIC_MISMATCH','invalid status'])test(`${client} registration preserves config after non-ended probe outcome ${outcome}`,async t=>{
  const {readFileSync}=await import('node:fs'),{join}=await import('node:path');
  const f=await brokerFixture(t),s=scratch(t),topic='probe/refusal';
  const run=async()=>cli(s.env,['join',f.url,'-','--name','probe-user','--client',client],await issue(f,topic));
  assert.equal((await run()).code,0);
- const old=added(s,client),config=client==='claude'?join(s.env.CLAUDE_CONFIG_DIR,'.claude.json'):join(s.dir,client+'-'+nameOf(old)+'.json');
+ const old=added(s,client),config=join(s.env.CLAUDE_CONFIG_DIR,'.claude.json');
  const before=readFileSync(config),calls=s.readCalls().length;let probes=0;
  const original=f.server.listeners('request')[0];f.server.removeAllListeners('request');
  f.server.on('request',(req,res)=>{
@@ -60,7 +60,7 @@ test('join creates disjoint sanitized registrations and pinned IDs for two topic
  const f=await brokerFixture(t),s=scratch(t),topics=['feature/x','feature_x'],results=[];
  for(const topic of topics){const code=await issue(f,topic),result=await cli(s.env,['join',f.url,'-','--name','topic-user'],code);assert.equal(result.code,0);const data=JSON.parse(result.stdout);assert.equal(data.topic,topic);results.push(data);}
  assert.equal(f.store.get("SELECT count(*) n FROM credentials WHERE user='topic-user'").n,1);assert.equal(results[0].credential_path,results[1].credential_path);
- for(const client of ['claude','codex']){
+ for(const client of ['claude']){
   const calls=s.readCalls().filter(c=>c.client===client&&c.args[1]==='add');assert.equal(calls.length,2);assert.notEqual(nameOf(calls[0]),nameOf(calls[1]));
   for(let i=0;i<2;i++){assert.match(nameOf(calls[i]),/^[A-Za-z0-9_-]+$/);assert.ok(nameOf(calls[i]).length<=64);assert.equal(savedEnv(calls[i].args).CHANNEL_TOPIC,topics[i]);}
   assert.notEqual(savedEnv(calls[0].args).CHANNEL_SESSION_ID,savedEnv(calls[1].args).CHANNEL_SESSION_ID);
@@ -74,23 +74,22 @@ test('re-invite after remote leave repairs only the ended registration without t
  const path=credentialPath(f.a,'bob',{env:s.env});writeCredential(path,processTokens.bob,{home:s.env.HOME});const original=statSync(path);
  const invite=async()=>{const r=await f.call(f.a,'alice','issuer',null,'/invites',{topics:[topic]});assert.equal(r.status,201);return r.data.code;};
  const join=async(client)=>{const code=await invite(),r=await cli(s.env,['join',f.a,'-','--name','bob',...(client?['--client',client]:[])],code);assert.equal(r.code,0);return JSON.parse(r.stdout);};
- await join();const oldClaude=savedEnv(added(s,'claude').args),oldCodex=savedEnv(added(s,'codex').args);
- const context={url:f.a,clients:f.clients},first=await channel(context,{...s.env,...oldClaude}),second=await channel(context,{...s.env,...oldCodex});
- assert.equal((await first.call('members')).isError,undefined);assert.equal((await second.call('members')).isError,undefined);
+ await join();const oldClaude=savedEnv(added(s,'claude').args);
+ const context={url:f.a,clients:f.clients},first=await channel(context,{...s.env,...oldClaude});
+ assert.equal((await first.call('members')).isError,undefined);
  const sent=await f.call(f.a,'alice','publisher',null,'/send',{to:'topic:x',body:'retained across rejoin'});assert.equal(sent.status,201);
- await first.client.close();await second.client.close();
+ await first.client.close();
  assert.equal((await f.call(f.b,'bob','remote-leaver','x','/topics/leave',{name:'x'})).status,200);
  const restore=await f.call(f.a,'bob','restore','x','/join',{name:'bob',code:await invite()});assert.equal(restore.status,201);
- const repairedCodex=await join('codex');assert.equal(repairedCodex.status,'already_member');const activeEnv=savedEnv(added(s,'codex').args);assert.notEqual(activeEnv.CHANNEL_SESSION_ID,oldCodex.CHANNEL_SESSION_ID);
+ const repaired=await join('claude');assert.equal(repaired.status,'already_member');assert.equal(repaired.adapters.find(a=>a.client==='claude').status,'registered');const activeEnv=savedEnv(added(s,'claude').args);assert.notEqual(activeEnv.CHANNEL_SESSION_ID,oldClaude.CHANNEL_SESSION_ID);assert.equal(activeEnv.CHANNEL_TOPIC,'x');
  const active=await channel(context,{...s.env,...activeEnv});assert.equal((await active.call('register_workstream',{name:'preserved-lease'})).isError,undefined);await active.client.close();
  const db=new Store(f.file);db.run('UPDATE agents SET last_seen=1 WHERE session_id=?',activeEnv.CHANNEL_SESSION_ID);db.run("UPDATE workstreams SET lease_until=2 WHERE name='preserved-lease'");const count=db.get('SELECT count(*) n FROM agents').n;db.close();
- const beforeCodexAdds=s.readCalls().filter(c=>c.client==='codex'&&c.args[1]==='add').length;
- const result=await join();assert.equal(result.status,'already_member');assert.equal(result.adapters.find(a=>a.client==='codex').status,'skipped');assert.equal(result.adapters.find(a=>a.client==='claude').status,'registered');
- const fresh=savedEnv(added(s,'claude').args);assert.notEqual(fresh.CHANNEL_SESSION_ID,oldClaude.CHANNEL_SESSION_ID);assert.equal(fresh.CHANNEL_TOPIC,'x');
+ const beforeAdds=s.readCalls().filter(c=>c.client==='claude'&&c.args[1]==='add').length;
+ const result=await join();assert.equal(result.status,'already_member');assert.equal(result.adapters.find(a=>a.client==='claude').status,'skipped');
  const verify=new Store(f.file);try{assert.equal(verify.get('SELECT last_seen FROM agents WHERE session_id=?',activeEnv.CHANNEL_SESSION_ID).last_seen,1);assert.equal(verify.get("SELECT lease_until FROM workstreams WHERE name='preserved-lease'").lease_until,2);assert.equal(verify.get('SELECT count(*) n FROM agents').n,count);}finally{verify.close();}
- assert.equal(s.readCalls().filter(c=>c.client==='codex'&&c.args[1]==='add').length,beforeCodexAdds);assert.equal(statSync(path).ino,original.ino);
+ assert.equal(s.readCalls().filter(c=>c.client==='claude'&&c.args[1]==='add').length,beforeAdds);assert.equal(statSync(path).ino,original.ino);
  const old=await f.call(f.b,'bob',oldClaude.CHANNEL_SESSION_ID,'x','/session/status');assert.equal(old.data.error,'SESSION_ENDED');
- const reader=await channel(context,{...s.env,...fresh});
+ const reader=await channel(context,{...s.env,...activeEnv});
  const inbox=await reader.call('inbox');assert.equal(inbox.isError,undefined);assert.equal(inbox.structuredContent.messages.filter(m=>m.id===sent.data.id).length,1);
  await eventually(()=>reader.notifications.some(n=>n.meta.message_id===String(sent.data.id)));const barrier=await f.stream(f.b,'alice','rejoin-owner-barrier',null),tick=barrier.heartbeats;await eventually(()=>barrier.heartbeats>=tick+3);
  assert.equal(reader.notifications.filter(n=>n.meta.message_id===String(sent.data.id)).length,1);await reader.client.close();

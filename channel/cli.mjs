@@ -132,7 +132,7 @@ export async function join(options, deps = {}) {
   const env = deps.env ?? process.env, fetcher = deps.fetch ?? brokerFetch, timeoutMs = deps.timeoutMs ?? 10000;
   const url = normaliseUrl(options.url, env), name = options.name ?? (deps.username ?? (()=>userInfo().username))();
   const path = credentialPath(url, name, { env });
-  requireValue(!options.client || ['claude','codex','claude-plugin','none'].includes(options.client), 'INVALID_CLIENT', 'Use --client claude, codex, claude-plugin or none.');
+  requireValue(!options.client || ['claude','claude-plugin','none'].includes(options.client), 'INVALID_CLIENT', 'Use --client claude, claude-plugin or none.');
   requireValue(typeof options.code === 'string' && options.code.length === 80 && /^tmi_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/.test(options.code),
     'INVALID_INVITE_CODE', 'Paste a complete invite code from the owner; use - to read it from stdin.');
   // The plugin saves these paths for its skills' shell commands; refuse before
@@ -169,7 +169,7 @@ export async function join(options, deps = {}) {
         (recovered ? ' The new credential and membership were revoked.' : ' Recovery could not be confirmed; ask the owner to remove the new membership.'));
     }
   }
-  const clients = options.client === 'none' ? [] : options.client ? [options.client] : ['claude','codex'].filter(client=>(deps.available ?? available)(client,env));
+  const clients = options.client === 'none' ? [] : options.client ? [options.client] : ['claude'].filter(client=>(deps.available ?? available)(client,env));
   const probe=statusProbe({fetcher,url,token:token??joined.token,name,workspace:joined.workspace,topic:joined.topic,timeoutMs});
   const adapters=[];for(const client of clients){
     const binding={url,workspace:joined.workspace,topic:joined.topic,path},adapterDeps={spawn:deps.spawn,env,probe,cwd:deps.cwd??process.cwd()};
@@ -382,7 +382,7 @@ async function main() {
       if (result.adapters.some(adapter=>adapter.status === 'conflict')) process.exitCode = 1;
       return;
     }
-    requireValue(command === 'join' && url && argument, 'INVALID_JOIN_ARGS', 'Use team-messaging join <broker-url> <code|-> [--name user] [--client claude|codex|claude-plugin|none] [--claude-session id --data-dir dir [--project dir]].');
+    requireValue(command === 'join' && url && argument, 'INVALID_JOIN_ARGS', 'Use team-messaging join <broker-url> <code|-> [--name user] [--client claude|claude-plugin|none] [--claude-session id --data-dir dir [--project dir]].');
     const options = { ...flags(rest, ['--name','--client',...AGENT_FLAGS], 'INVALID_JOIN_ARGS', 'Pass each supported option once with its value.'), url };
     // Refuse unsafe transport before reading stdin, as well as before network access.
     normaliseUrl(url);
