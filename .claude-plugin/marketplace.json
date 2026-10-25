@@ -1,0 +1,14 @@
+{
+  "name": "team-messaging-local",
+  "owner": {
+    "name": "glab-services"
+  },
+  "description": "Local marketplace for the team-messaging plugin bundle.",
+  "plugins": [
+    {
+      "name": "team-messaging",
+      "source": "./plugins/team-messaging",
+      "description": "Team agent messaging channel, hooks and skills."
+    }
+  ]
+}

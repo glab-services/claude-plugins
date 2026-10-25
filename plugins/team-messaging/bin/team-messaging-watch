@@ -1,0 +1,2 @@
+#!/bin/sh
+exec node --use-system-ca "$(dirname "$0")/../runtime/channel/watch.mjs" "$@"
