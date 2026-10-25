@@ -1,0 +1,16 @@
+{
+  "name": "team-messaging",
+  "version": "0.10.0",
+  "description": "Team agent messaging: a poll-mode channel MCP server, Stop and SessionStart hooks that wake the session for new messages, and join/bind/claim/status/watch skills. One agent session per bound project.",
+  "author": { "name": "glab-services" },
+  "license": "Apache-2.0",
+  "userConfig": {
+    "broker_url": { "type": "string", "title": "Broker URL", "description": "HTTPS broker URL (plain HTTP only on loopback) of the saved credential. Written by team-messaging join or bind; projects are bound in their own .claude/settings.local.json.", "required": false },
+    "token_file": { "type": "string", "title": "Credential file", "description": "Path of the mode-0600 credential file join saved for this broker URL; the token itself is never stored in plugin configuration. Hand-named files are refused since 0.10.", "required": false },
+    "workspace": { "type": "string", "title": "Workspace", "description": "Unused since 0.10 (projects hold their binding); a 0.9 value is only offered for /team-messaging:bind --adopt-global.", "required": false },
+    "topic": { "type": "string", "title": "Topic", "description": "Unused since 0.10 (projects hold their binding).", "required": false },
+    "session_id": { "type": "string", "title": "Pinned session ID", "description": "Unused since 0.10 (projects hold their broker session).", "required": false },
+    "mode": { "type": "string", "title": "Delivery mode", "description": "poll (default); push only when started with the development channels flag.", "options": ["poll", "push"], "default": "poll" },
+    "arm": { "type": "string", "title": "Watcher arm", "description": "rewake (Stop hook wakes an idle session), bash (skill-started background watcher) or off. Changing it needs a Claude Code restart.", "options": ["rewake", "bash", "off"], "default": "rewake" }
+  }
+}

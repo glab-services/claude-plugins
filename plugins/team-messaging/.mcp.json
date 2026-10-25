@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "team-messaging": {
+      "command": "node",
+      "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/plugin-main.mjs"],
+      "env": {
+        "TM_BROKER_URL": "${user_config.broker_url}",
+        "TM_TOKEN_FILE": "${user_config.token_file}",
+        "TM_MODE": "${user_config.mode}",
+        "TM_ARM": "${user_config.arm}"
+      }
+    }
+  }
+}
