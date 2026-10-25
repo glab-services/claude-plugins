@@ -3,6 +3,7 @@
   "version": "0.9.3",
   "description": "Team agent messaging: a poll-mode channel MCP server, Stop and SessionStart hooks that wake the session for new messages, and join/bind/status/watch skills.",
   "author": { "name": "glab-services" },
+  "license": "Apache-2.0",
   "userConfig": {
     "broker_url": { "type": "string", "title": "Broker URL", "description": "HTTPS broker URL (plain HTTP only on loopback). Written by team-messaging join or bind.", "required": false },
     "token_file": { "type": "string", "title": "Credential file", "description": "Path of the mode-0600 credential file; the token itself is never stored in plugin configuration.", "required": false },
