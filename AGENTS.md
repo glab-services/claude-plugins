@@ -1,8 +1,8 @@
 # Working agreement
 
 - Use Node.js 24+ and pnpm. Read broker/README.md and channel/README.md before
-  changing messaging behavior; honor its milestone boundaries and stop for
-  review after each milestone.
+  changing messaging behavior. Keep changes scoped and stop for review after
+  each self-contained change.
 - Messaging tools must not execute commands on another developer's machine or
   expose human-only resolve/reopen operations to agents.
 - Use the existing Conventional Commit style: `feat(scope): ...`,

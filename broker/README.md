@@ -1,8 +1,8 @@
 # Team messaging broker — M1–M6
 
-This is a separate HTTP service and SQLite database. It never imports `main.ts`,
-the shared MCP server, demo OAuth, or `tools/index.ts`. Its only credentials are
-the per-developer tokens in its own file. There are no shell/fs/browser endpoints.
+This is a standalone HTTP service and SQLite database. It imports no MCP server,
+OAuth or tool code, and needs no npm packages. Its only credentials are the
+per-developer tokens in its own file. There are no shell/fs/browser endpoints.
 
 ## Run
 
