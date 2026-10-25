@@ -1,0 +1,11 @@
+node_modules/
+.pnpm-store/
+.tmp/
+
+dist/
+data/
+logs/
+
+.env
+
+broker/tokens.json

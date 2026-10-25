@@ -1,0 +1,21 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear|compact",
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/plugin-session-start.mjs"], "timeout": 15 },
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/watch.mjs", "--mode", "rewake", "--data-dir", "${CLAUDE_PLUGIN_DATA}"], "asyncRewake": true, "timeout": 28800 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/stop-hook.mjs"], "timeout": 15 },
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/watch.mjs", "--mode", "rewake", "--data-dir", "${CLAUDE_PLUGIN_DATA}"], "asyncRewake": true, "timeout": 28800 }
+        ]
+      }
+    ]
+  }
+}

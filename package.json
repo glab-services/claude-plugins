@@ -1,0 +1,31 @@
+{
+  "name": "claude-plugins",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "broker": "node broker/main.mjs",
+    "broker:cli": "node broker/cli.mjs",
+    "broker:test": "node --test broker/test/*.test.mjs test-support/*.test.mjs",
+    "broker:smoke": "bash broker/test/smoke.sh",
+    "channel": "node channel/main.mjs",
+    "channel:test": "node --test channel/test/*.test.mjs",
+    "channel:smoke": "node --test --test-name-pattern='two stdio sessions' channel/test/integration.test.mjs",
+    "messaging:hardening": "node --test broker/test/hardening.test.mjs broker/test/webhook-concurrency.test.mjs broker/test/retention-process.test.mjs channel/test/restart.test.mjs channel/test/queue-restart.test.mjs channel/test/hook.test.mjs",
+    "messaging:claude-hook": "RUN_CLAUDE_ACCEPTANCE=1 node --test channel/acceptance/claude-hook.test.mjs",
+    "messaging:plugin-wake": "RUN_CLAUDE_ACCEPTANCE=1 node --test channel/acceptance/plugin-wake.test.mjs",
+    "plugin:build": "node scripts/build-plugin.mjs --out dist/plugin",
+    "plugin:test": "node --test channel/plugin-test/*.test.mjs",
+    "messaging:membership": "node --test broker/test/membership.test.mjs channel/test/membership.test.mjs broker/test/invites.test.mjs channel/test/invites.test.mjs channel/test/join.test.mjs",
+    "messaging:workspaces": "node --test broker/test/schema-v5.test.mjs broker/test/workspaces.test.mjs channel/test/workspaces.test.mjs channel/test/hook.test.mjs",
+    "messaging:planning": "node --test broker/test/planning.test.mjs channel/test/planning.test.mjs channel/test/restart.test.mjs",
+    "messaging:queue": "node --test broker/test/queue.test.mjs broker/test/queue-recovery.test.mjs channel/test/queue.test.mjs channel/test/queue-restart.test.mjs",
+    "messaging:topics": "node --test broker/test/topics.test.mjs broker/test/topic-delivery.test.mjs broker/test/topic-skip.test.mjs channel/test/topics.test.mjs",
+    "messaging:retention": "node --test broker/test/retention-eligibility.test.mjs broker/test/retention-compaction.test.mjs broker/test/retention-process.test.mjs channel/test/retention.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "zod": "^4.6.7"
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "team-messaging": {
+      "command": "node",
+      "args": ["/absolute/path/to/claude-plugins/channel/main.mjs"],
+      "env": {
+        "BROKER_URL": "${BROKER_URL}",
+        "BROKER_TOKEN": "${TEAM_BROKER_TOKEN}",
+        "CHANNEL_WORKSPACE": "${CHANNEL_WORKSPACE:-default}",
+        "CHANNEL_SESSION_ID": "${CHANNEL_SESSION_ID}"
+      }
+    }
+  }
+}

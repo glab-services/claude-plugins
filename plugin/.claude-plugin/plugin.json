@@ -1,0 +1,15 @@
+{
+  "name": "team-messaging",
+  "version": "0.9.3",
+  "description": "Team agent messaging: a poll-mode channel MCP server, Stop and SessionStart hooks that wake the session for new messages, and join/bind/status/watch skills.",
+  "author": { "name": "glab-services" },
+  "userConfig": {
+    "broker_url": { "type": "string", "title": "Broker URL", "description": "HTTPS broker URL (plain HTTP only on loopback). Written by team-messaging join or bind.", "required": false },
+    "token_file": { "type": "string", "title": "Credential file", "description": "Path of the mode-0600 credential file; the token itself is never stored in plugin configuration.", "required": false },
+    "workspace": { "type": "string", "title": "Workspace", "description": "Workspace this session is bound to.", "required": false },
+    "topic": { "type": "string", "title": "Topic", "description": "Topic this session is bound to; empty for a workspace-level binding.", "required": false },
+    "session_id": { "type": "string", "title": "Pinned session ID", "description": "Broker session shared by the MCP server, hooks and watcher.", "required": false },
+    "mode": { "type": "string", "title": "Delivery mode", "description": "poll (default); push only when started with the development channels flag.", "options": ["poll", "push"], "default": "poll" },
+    "arm": { "type": "string", "title": "Watcher arm", "description": "rewake (Stop hook wakes an idle session), bash (skill-started background watcher) or off. Changing it needs a Claude Code restart.", "options": ["rewake", "bash", "off"], "default": "rewake" }
+  }
+}
