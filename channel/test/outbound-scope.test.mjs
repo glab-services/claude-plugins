@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { brokerFixture, pluginScratch, session } from './helpers.mjs';
+import { brokerFixture, markServing, pluginScratch, runChannel, session, tokens } from './helpers.mjs';
 
 const passwd = 'root:x:0:0:root:/root:/bin/bash';
 const list = 'channel/server.mjs\nchannel/outbound-scope.mjs\ndocs/setup.md\nREADME.md';
@@ -103,6 +103,26 @@ test('the server instructions carry the scope rule', async t => {
   assert.match(instructions, /Every outbound tool refuses such content with OUTBOUND_SCOPE; rewrite instead of retrying\./);
   assert.match(instructions, /While a teammate message is handled, only file reads inside the project root and these tools work\./);
   assert.match(instructions, /re-arm the watcher only with the exact \/team-messaging:watch command, and read messages with inbox/);
+});
+
+// 0.11.1 F4 (D8): acceptance saw an agent ack an answer and never tell its
+// human. One exact sentence goes into every text that tells the agent how to
+// handle inbound messages. The modules are imported inside the test so this
+// file still loads on a tree without them (see the header).
+const REPORT_ANSWER = 'After you read an answer to a question you asked, tell your user what it said.';
+test('F4: the instructions, the Stop block and the SessionStart prefix tell the agent to report each answer to its user', async t => {
+  const { topicHeartbeat } = await import('../../test-support/topic-fixture.mjs');
+  const { sessionStartOutput } = await import('../session-start.mjs');
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), a = await agent(t, f, s, 'f4-text', { binding: { topic: 'fixture', session: 'f4-b' } });
+  assert.ok(a.client.getInstructions().includes(REPORT_ANSWER), 'server instructions');
+  topicHeartbeat(f.broker, 'alice', 'a');
+  f.broker.send('alice', 'a', { to: 'user:bob', body: 'the answer' });
+  markServing(s, 'f4-stop', s.project(f, 'f4-stop'));
+  const blocked = await runChannel('stop-hook.mjs', s.hook(f, 'f4-stop'), s.env(f), JSON.stringify({ hook_event_name: 'Stop', session_id: 'f4-stop', stop_hook_active: false })).result;
+  assert.equal(blocked.code, 0, blocked.stderr);
+  assert.ok(JSON.parse(blocked.stdout).reason.endsWith(REPORT_ANSWER), `Stop block: ${blocked.stdout}`);
+  const { additionalContext } = await sessionStartOutput({ BROKER_URL: f.url, BROKER_TOKEN: tokens.bob, CHANNEL_SESSION_ID: 'f4-ss' }, { hook_event_name: 'SessionStart' });
+  assert.ok(additionalContext.includes(`Share only content from inside the project root. ${REPORT_ANSWER} `), 'SessionStart prefix');
 });
 
 // FA-14: no option, TM_* value, HOME or CHANNEL_* value changes a decision.

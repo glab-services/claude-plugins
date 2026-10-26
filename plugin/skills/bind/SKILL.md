@@ -18,7 +18,7 @@ Run this in the Claude session that should be this project's agent session: only
    ```
 
 3. Read the JSON result. `adapters[0].status` is:
-   - `registered`: the project is bound to this session. Relay the `hint`: reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect), or restart with `claude --continue` when the hint says the credential was just saved.
+   - `registered`: the project is bound to this session. Relay the `hint`: the tools appear within a few seconds; if they do not, reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect). Restart with `claude --continue` when the hint says the credential was just saved.
    - `skipped`: this project is already bound to the same workspace and topic for this session; nothing changed.
    - `conflict`, `failed` or `manual`: show the `hint` and stop.
 4. An error comes back as `{error, hint}` on stderr; show the hint. Nothing is written for any of these:

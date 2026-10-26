@@ -4,9 +4,10 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join as pathJoin } from 'node:path';
-import { brokerFixture, tokens, eventually, pluginScratch, runChannel, umaskPluginData, credentialScratch } from './helpers.mjs';
+import { brokerFixture, tokens, eventually, pluginScratch, runChannel, umaskPluginData, credentialScratch, markServing } from './helpers.mjs';
 import { writeSessionRecord } from '../project-options.mjs';
 import { acquireLock, reported, stateDir } from '../watch-state.mjs';
 import { HOOK_TIMEOUT_S, REWAKE_DEADLINE_S } from '../watch.mjs';
@@ -30,7 +31,9 @@ async function pending(t, bodies = ['first body SENTINEL-BODY-1']) {
 
 test('a pending message gives one metadata line per message and is never acked', async t => {
   const { f, sent } = await pending(t, ['first body SENTINEL-BODY-1', 'second body SENTINEL-BODY-2']);
-  const s = pluginScratch(t), b = await bash(s, f, 'bash-key').result, r = await rewake(s, f, 'rewake-key').result;
+  const s = pluginScratch(t);
+  for (const key of ['bash-key', 'rewake-key']) markServing(s, key, s.project(f, key));
+  const b = await bash(s, f, 'bash-key').result, r = await rewake(s, f, 'rewake-key').result;
   const expected = sent.map(m => `team-message id=${m.id} thread=${m.thread_id} from=alice kind=finding topic=${FIXTURE_TOPIC}`).join('\n') + '\n';
   assert.equal(b.code, 0); assert.equal(b.stdout, expected); assert.equal(b.stderr, '');
   assert.equal(r.code, 2); assert.equal(r.stderr, expected); assert.equal(r.stdout, '');
@@ -43,7 +46,9 @@ test('a topic message line carries its topic label', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' });
   topicHeartbeat(f.broker, 'alice', 'a');
   const sent = f.broker.send('alice', 'a', { to: `topic:${FIXTURE_TOPIC}`, body: 'topic body', kind: 'question' });
-  const s = pluginScratch(t), r = await bash(s, f, 'topic-key', [], {}, { topic: FIXTURE_TOPIC }).result;
+  const s = pluginScratch(t);
+  markServing(s, 'topic-key', s.project(f, 'topic-key', { topic: FIXTURE_TOPIC }));
+  const r = await bash(s, f, 'topic-key', [], {}, { topic: FIXTURE_TOPIC }).result;
   assert.equal(r.stdout, `team-message id=${sent.id} thread=${sent.thread_id} from=alice kind=question topic=${FIXTURE_TOPIC}\n`);
   noAck(f);
 });
@@ -51,6 +56,7 @@ test('a topic message line carries its topic label', async t => {
 test('a reported message does not wake a second run, which polls without a busy loop until its deadline', async t => {
   const { f } = await pending(t);
   const s = pluginScratch(t);
+  markServing(s, 'cursor', s.project(f, 'cursor'));
   assert.equal((await bash(s, f, 'cursor').result).code, 0);
   const before = f.requests.filter(r => r.path === '/inbox?since=0').length;
   const again = await bash(s, f, 'cursor', ['--deadline-s', '3']).result;
@@ -75,6 +81,7 @@ test('one watcher per session: a live lock arms nothing, a dead or expired lock 
   writeFileSync(lock('dead'), JSON.stringify({ pid: gone.child.pid, deadline: Date.now() + 60000 }), { mode: 0o600 });
   writeFileSync(lock('expired'), JSON.stringify({ pid: process.pid, deadline: Date.now() - 1 }), { mode: 0o600 });
   for (const key of ['dead', 'expired']) {
+    markServing(s, key, s.project(f, key));
     const replaced = await bash(s, f, key).result;
     assert.equal(replaced.stdout, `team-message id=${sent[0].id} thread=${sent[0].thread_id} from=alice kind=finding topic=${FIXTURE_TOPIC}\n`, key);
     assert.equal(existsSync(lock(key)), false, `${key}: released after a normal exit`);
@@ -173,6 +180,8 @@ test('an unbound watcher exits 5 in bash mode and silently in rewake mode, like 
   writeSessionRecord(s.data, 'k2', s.project(f, 'the-agent'), { home: s.home });
   const inert = await runChannel('watch.mjs', ['--mode', 'bash', '--session-key', 'k2', '--claude-session', 'k2', '--data-dir', s.data], s.tmEnv(f)).result;
   assert.equal(inert.code, 5, 'the bash watcher names its refusal'); assert.equal(JSON.parse(inert.stderr).error, 'NOT_AGENT_SESSION');
+  // Review r2 item 2: the hint matches in-place promotion.
+  assert.equal(JSON.parse(inert.stderr).hint, 'This Claude session is not the agent session of this project; run /team-messaging:claim here; the tools load within a few seconds, reconnect if they do not.');
   for (const args of [['--project-dir', unbound, '--data-dir', s.data], [...s.hook(f, 'k'), '--claude-session', 'not-the-agent'], s.hook(f, 'k')]) {
     const env = args.includes('not-the-agent') || args.includes(unbound) ? s.env(f) : s.env(f, { CLAUDE_PLUGIN_OPTION_ARM: 'off' });
     const quiet = await runChannel('watch.mjs', ['--mode', 'rewake', ...args], env, stopInput('k')).result;
@@ -198,7 +207,9 @@ test('a thread ID outside the safe pattern is omitted, and a message without a t
   });
   await new Promise(resolve => stub.listen(0, '127.0.0.1', resolve));
   t.after(() => { stub.closeAllConnections(); return new Promise(resolve => stub.close(resolve)); });
-  const s = pluginScratch(t), result = await bash(s, { url: `http://127.0.0.1:${stub.address().port}` }, 'odd').result;
+  const s = pluginScratch(t), url = `http://127.0.0.1:${stub.address().port}`;
+  markServing(s, 'odd', s.project({ url }, 'odd'));
+  const result = await bash(s, { url }, 'odd').result;
   assert.equal(result.stdout, 'team-message id=7 from=alice kind=question\n');
 });
 
@@ -259,6 +270,7 @@ test('broker error codes and hints never reach wake or diagnostic text', async t
 
 test('a rewake watcher whose parent exits stops polling, releases its lock and wakes nobody', async t => {
   const { f } = await pending(t), s = pluginScratch(t), dir = stateDir(s.data, { home: s.home });
+  markServing(s, 'orphan', s.project(f, 'orphan'));
   await bash(s, f, 'orphan').result; // report the pending message so the watcher idles
   const out = pathJoin(s.dir, 'orphan.out');
   const parent = `const { spawn } = require('node:child_process'), fs = require('node:fs');
@@ -282,6 +294,7 @@ for (const mode of [0o775, 0o777])
   test(`the rewake watcher wakes through a 0${mode.toString(8)} plugin data dir below a private 0700 ancestor`, async t => {
     const { f, sent } = await pending(t), s = pluginScratch(t);
     umaskPluginData(s, { mode });
+    markServing(s, 'umask', s.project(f, 'umask'));
     const r = await rewake(s, f, 'umask').result;
     assert.equal(r.code, 2, r.stderr);
     assert.equal(r.stderr, `team-message id=${sent[0].id} thread=${sent[0].thread_id} from=alice kind=finding topic=${FIXTURE_TOPIC}\n`);
@@ -306,6 +319,7 @@ const startWatcher = (s, f, key, extra = []) => runChannel('watch.mjs', ['--mode
 
 test('a SessionStart watcher with messages already pending wakes at once, after one inbox poll', async t => {
   const { f, sent } = await pending(t), s = pluginScratch(t);
+  markServing(s, 'resumed', s.project(f, 'resumed'));
   const r = await startWatcher(s, f, 'resumed').result;
   assert.equal(r.code, 2, r.stderr);
   assert.equal(r.stderr, `team-message id=${sent[0].id} thread=${sent[0].thread_id} from=alice kind=finding topic=${FIXTURE_TOPIC}\n`);
@@ -313,10 +327,32 @@ test('a SessionStart watcher with messages already pending wakes at once, after 
   noAck(f);
 });
 
+// 0.11.1 F5 (D5): a watcher of a session whose MCP server has not listed its
+// tools (right after a claim) must not open the strict window or wake a
+// session that cannot read or ack. It skips that poll and keeps polling, so
+// it wakes once the server serves.
+test('F5: a rewake watcher neither opens the window nor wakes until this session\'s MCP server serves, then wakes once', async t => {
+  const { f, sent } = await pending(t), s = pluginScratch(t), project = s.project(f, 'unserved');
+  const window = pathJoin(s.data, 'state', `scope-${createHash('sha256').update(realpathSync(project)).digest('hex')}.json`);
+  const run = rewake(s, f, 'unserved', ['--deadline-s', '30']);
+  t.after(() => { if (run.child.exitCode === null && run.child.signalCode === null) run.child.kill('SIGKILL'); });
+  await eventually(() => f.requests.filter(r => r.path === '/inbox?since=0').length >= 2, 6000);
+  assert.deepEqual([run.child.exitCode, run.child.signalCode], [null, null], 'still polling after two polls');
+  assert.equal(existsSync(window), false, 'no window');
+  assert.deepEqual(reported(stateDir(s.data, { home: s.home }), 'unserved'), [], 'nothing claimed');
+  markServing(s, 'unserved', project);
+  const woke = await run.result;
+  assert.equal(woke.code, 2, woke.stderr);
+  assert.equal(woke.stderr, `team-message id=${sent[0].id} thread=${sent[0].thread_id} from=alice kind=finding topic=${FIXTURE_TOPIC}\n`);
+  assert.equal(existsSync(window), true, 'the window opened before the wake');
+  noAck(f);
+});
+
 test('overlapping SessionStart and Stop watchers for one session wake exactly once', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
   topicHeartbeat(f.broker, 'alice', 'a');
   const lock = pathJoin(stateDir(s.data, { home: s.home }), 'overlap.watch.lock');
+  markServing(s, 'overlap', s.project(f, 'overlap'));
   const first = startWatcher(s, f, 'overlap', ['--deadline-s', '30']);
   await eventually(() => existsSync(lock), 4000);
   // The Stop watcher finds the live lock and exits silently (rewake mode
@@ -368,6 +404,7 @@ const lockOf = (s, key) => { try { return JSON.parse(readFileSync(pathJoin(state
 test('a watcher whose host was SIGKILLed loses its lock at once to the new host, which then wakes', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), log = pathJoin(s.dir, 'orphan.log');
   topicHeartbeat(f.broker, 'alice', 'a');
+  markServing(s, 'resume', s.project(f, 'resume'));
   // A 5 s poll keeps the orphan alive, holding its lock, well past the takeover.
   const old = host(t, s, f, 'resume', log, ['--poll-s', '5', '--deadline-s', '60']), orphan = await old.pid;
   await eventually(() => lockOf(s, 'resume')?.pid === orphan, 4000);
@@ -398,6 +435,7 @@ test('a watcher whose host was SIGKILLed loses its lock at once to the new host,
 test('a lock with a live, different host and a lock without a host are both kept', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
   const dir = stateDir(s.data, { home: s.home }), lock = pathJoin(dir, 'live-host.watch.lock');
+  markServing(s, 'live-host', s.project(f, 'live-host'));
   // A lock of a live watcher (this test process) whose host is another live process.
   const other = host(t, s, f, 'unused', pathJoin(s.dir, 'unused.log'), ['--deadline-s', '30']); await other.pid;
   writeFileSync(lock, JSON.stringify({ pid: process.pid, host: other.proc.pid, deadline: Date.now() + 60000 }), { mode: 0o600 });
@@ -423,7 +461,9 @@ test('an orphan whose host dies during inbox() never claims the pending message'
   });
   await new Promise(resolve => proxy.listen(0, '127.0.0.1', resolve));
   t.after(() => { proxy.closeAllConnections(); return new Promise(resolve => proxy.close(resolve)); });
-  const h = host(t, s, { url: `http://127.0.0.1:${proxy.address().port}` }, 'midpoll', log, ['--deadline-s', '30']);
+  const via = { url: `http://127.0.0.1:${proxy.address().port}` };
+  markServing(s, 'midpoll', s.project(via, 'midpoll'));
+  const h = host(t, s, via, 'midpoll', log, ['--deadline-s', '30']);
   const orphan = await h.pid;
   await inPoll; h.proc.kill('SIGKILL');
   await eventually(() => gone(orphan), 8000);
@@ -438,6 +478,7 @@ test('an orphan whose host dies during inbox() never claims the pending message'
 test('an orphan whose host dies right after its claim undoes the claim, and the resumed watcher wakes for it', async t => {
   const { f, sent } = await pending(t), s = pluginScratch(t), log = pathJoin(s.dir, 'claim.log'), gate = pathJoin(s.dir, 'after-claim');
   const dir = stateDir(s.data, { home: s.home });
+  markServing(s, 'claimed', s.project(f, 'claimed'));
   const old = host(t, s, f, 'claimed', log, ['--deadline-s', '30'], gated(`${gate}.claimed`, gate)), orphan = await old.pid;
   await eventually(() => existsSync(`${gate}.claimed`), 4000);
   assert.deepEqual(reported(dir, 'claimed'), [sent[0].id], 'the orphan claimed the message');
@@ -458,6 +499,7 @@ test('an orphan whose host dies right after its claim undoes the claim, and the 
 // past its deadline or a SIGTERM, and the lock is released either way.
 test('a never-resolving afterClaim still ends at the deadline and on SIGTERM, releasing the lock', async t => {
   const { f, sent } = await pending(t), s = pluginScratch(t), dir = stateDir(s.data, { home: s.home });
+  for (const key of ['hang-deadline', 'hang-term']) markServing(s, key, s.project(f, key));
   const run = (key, mark, args) => runInProcess(s, f, key, hanging(mark), args);
   // Deadline: the claim stands and is delivered once the wait is cut.
   const atDeadline = await run('hang-deadline', pathJoin(s.dir, 'd.claimed'), ['--deadline-s', '2']).result;

@@ -9,8 +9,9 @@ import { join as pathJoin } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ToolListChangedNotificationSchema } from '@modelcontextprotocol/sdk/types.js';
-import { brokerFixture, tokens, pluginScratch, runChannel, bindProject, credentialScratch, writeProjectFile, projectMac, eventually } from './helpers.mjs';
-import { prepareTopicFixture, FIXTURE_TOPIC } from '../../test-support/topic-fixture.mjs';
+import { brokerFixture, tokens, pluginScratch, runChannel, bindProject, credentialScratch, writeProjectFile, projectMac, eventually, markServing } from './helpers.mjs';
+import { prepareTopicFixture, topicHeartbeat, FIXTURE_TOPIC } from '../../test-support/topic-fixture.mjs';
+import { createHash } from 'node:crypto';
 import { bind, claim, join } from '../cli.mjs';
 import { findProject, projectOptions, projectTarget, readSessionRecord, writeProjectOptions, writeSessionRecord } from '../project-options.mjs';
 import { credentialPath } from '../credentials.mjs';
@@ -138,6 +139,7 @@ test('two projects with two agent sessions each heartbeat, wake and send in thei
   assert.deepEqual([sentFrom('from a'), sentFrom('from b')], [{ from_session: 'sa', workspace: 'default' }, { from_session: 'sb', workspace: 'w2' }]);
   f.broker.heartbeat('alice', 'alice-a', 'worker', 'default', FIXTURE_TOPIC); f.broker.heartbeat('alice', 'alice-b', 'worker', 'w2', 'tb');
   const toA = f.broker.send('alice', 'alice-a', { to: 'user:bob', body: 'to a' }), toB = f.broker.send('alice', 'alice-b', { to: 'user:bob', body: 'to b' });
+  markServing(s, 'agent-a', a); markServing(s, 'agent-b', b);
   const env = s.env(f), [ra, rb] = await Promise.all([hooks(s, env, a, 'agent-a'), hooks(s, env, b, 'agent-b')]);
   for (const [results, own, other, workspace] of [[ra, toA, toB, 'default'], [rb, toB, toA, 'w2']]) {
     const [start, stop, watcher] = results;
@@ -166,7 +168,7 @@ test('a second Claude session in the same project is inert: zero broker requests
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
   bindProject(project, { url: f.url, claudeSession: 'agent-1' });
   const [start, stop, watcher] = await hooks(s, s.env(f), project, 'other-2');
-  assert.equal(contextOf(start), "team-messaging: this project's agent is Claude session agent-1; run /team-messaging:claim here to take over");
+  assert.equal(contextOf(start), "team-messaging: this session is not this project's team-messaging agent (the agent is Claude session agent-1), so it has no team-messaging tools and is not woken for team messages. A fork or /clear gives a session a new id; if the user expects this session to be the agent, tell them to run /team-messaging:claim here.");
   assert.deepEqual([start.stderr, stop.stdout, stop.stderr, watcher.code, watcher.stdout, watcher.stderr], ['', '', '', 0, '', '']);
   const m = await mcp(t, mcpEnv(s, f, 'other-2', project));
   assert.deepEqual(m.client.getServerCapabilities().tools, { listChanged: true });
@@ -177,6 +179,38 @@ test('a second Claude session in the same project is inert: zero broker requests
   await new Promise(resolve => setTimeout(resolve, 1000));
   assert.deepEqual(f.requests, []);
   assert.deepEqual(m.logs.join('').trim().split('\n').map(line => JSON.parse(line)), [{ event: 'plugin_inert', state: 'inert', code: 'NOT_AGENT_SESSION' }]);
+});
+
+// F1 (acceptance fixes, D3): the inert server sends instructions at initialize: its
+// state and how to claim, then the shared messaging rules, which a server
+// promoted in place (D6) keeps, since instructions cannot change later.
+const ACK_RULE = 'Ack each message ID before answering or acting.';
+test('F1: the inert MCP server\'s instructions say this session is not the agent and how to claim', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project'), unbound = gitDir(s.dir, 'unbound');
+  bindProject(project, { url: f.url, claudeSession: 'agent-1' });
+  const inertServer = await mcp(t, mcpEnv(s, f, 'other-2', project)), inert = inertServer.client.getInstructions();
+  // Follow-up to review r1 R4: the refusal hint matches in-place promotion too.
+  assert.equal((await inertServer.client.callTool({ name: 'inbox', arguments: {} })).structuredContent.hint, 'This Claude session is not the agent session of this project; only the user can move the agent here with /team-messaging:claim; the tools load within a few seconds, reconnect the MCP server if they do not.');
+  assert.ok(inert?.includes('/team-messaging:claim'), inert);
+  assert.ok(inert.includes(ACK_RULE), inert);
+  // Review r1 S2: the model is told that a Bash-run command can also do it.
+  assert.ok(inert.includes('Only /team-messaging:claim, bind or join run in this session makes it the agent (a model-run Bash command can do this when Bash is auto-approved; see docs/setup.md).'), inert);
+  const idleServer = await mcp(t, mcpEnv(s, f, 'any', unbound)), idle = idleServer.client.getInstructions();
+  assert.ok(idle?.includes('/team-messaging:bind'), idle);
+  assert.ok(idle.includes(ACK_RULE), idle);
+  // Review r1 R4: with in-place promotion the tools load without a reconnect.
+  const refusedIdle = (await idleServer.client.callTool({ name: 'inbox', arguments: {} })).structuredContent;
+  assert.equal(refusedIdle.hint, 'This project has no team-messaging binding; run /team-messaging:bind or /team-messaging:join in the session that should be the agent; the tools load within a few seconds, reconnect the MCP server if they do not.');
+  assert.deepEqual(f.requests, []);
+});
+
+test('F1: the inert MCP server\'s instructions name the refusal code in the invalid state', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
+  writeProjectFile(project, { version: 1, claude_session_id: 'agent-1', bindings: ['default::shared-b'], mac: 'a'.repeat(64) });
+  const instructions = (await mcp(t, mcpEnv(s, f, 'agent-1', project))).client.getInstructions();
+  assert.ok(instructions?.includes('The team-messaging binding of this project was refused (PROJECT_OPTIONS_UNTRUSTED)'), instructions);
+  assert.ok(instructions.includes(ACK_RULE), instructions);
+  assert.deepEqual(f.requests, []);
 });
 
 test('claim moves the agent; the old MCP refuses its next call and stops within 6 s; the old watcher exits silently; session_id unchanged', async t => {
@@ -232,6 +266,127 @@ test('F2: after a fork SessionStart, claim finds the project from the session re
   assert.equal(claimed.code, 0, claimed.stderr);
   assert.equal(JSON.parse(claimed.stdout).status, 'claimed');
   assert.equal(findProject(project).options.claude_session_id, 'agent-2');
+});
+
+// F5 (acceptance fixes, D4): the active server writes its serving record only once the
+// host has listed its tools, and removes it when it demotes or exits, so a
+// hook never wakes a session whose server no longer serves.
+test('F5: the agent server\'s serving record appears only after tools/list and is gone after demotion and after exit', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
+  const record = session => pathJoin(s.data, 'state', `${session}.serving`), exists = path => { try { statSync(path); return true; } catch { return false; } };
+  bindProject(project, { url: f.url, claudeSession: 'agent-1', session: 'live-s' });
+  const first = await mcp(t, mcpEnv(s, f, 'agent-1', project));
+  await eventually(() => requestsOf(f, 'live-s').length > 0, 4000);
+  assert.equal(exists(record('agent-1')), false, 'no record before tools/list');
+  assert.ok((await first.client.listTools()).tools.length > 10);
+  const written = JSON.parse(readFileSync(record('agent-1'), 'utf8'));
+  assert.deepEqual([written.v, written.root, written.pid === process.pid], [1, fs.realpathSync(project), false], 'written by the server process');
+  const claimed = await runChannel('cli.mjs', ['claim', '--claude-session', 'agent-2', '--project', project], s.tmEnv(f)).result;
+  assert.equal(claimed.code, 0, claimed.stderr);
+  await eventually(() => !exists(record('agent-1')), 6000);
+  // After exit: close the client, wait until the child process is gone, then
+  // require the file itself to be absent (round 1, A7; a dead pid is not enough).
+  const second = await mcp(t, mcpEnv(s, f, 'agent-2', project));
+  assert.ok((await second.client.listTools()).tools.length > 10);
+  assert.equal(exists(record('agent-2')), true);
+  const pid = JSON.parse(readFileSync(record('agent-2'), 'utf8')).pid;
+  await second.client.close();
+  await eventually(() => { try { process.kill(pid, 0); return false; } catch { return true; } }, 6000);
+  assert.equal(exists(record('agent-2')), false, 'the record file is gone after exit');
+});
+
+// F3 (acceptance fixes, D6): a claim, bind or join in a session whose MCP server carries
+// that session's id used to need a manual reconnect. The inert server now
+// re-checks its binding and, once active, serves the tools on the same
+// connection and sends tools/list_changed. It is constructed with the active
+// capability set, because capabilities cannot be added after connect.
+test('F3: a claim promotes the claiming session\'s inert MCP server in place: tools/list_changed, the full tool list and a working inbox, without a reconnect', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
+  bindProject(project, { url: f.url, claudeSession: 'agent-1', session: 'promote-s' });
+  const m = await mcp(t, mcpEnv(s, f, 'agent-2', project));
+  assert.deepEqual(m.client.getServerCapabilities().experimental?.['claude/channel'], {}, 'the inert server already declares the channel capability');
+  assert.deepEqual((await m.client.listTools()).tools, []);
+  const claimed = await runChannel('cli.mjs', ['claim', '--claude-session', 'agent-2', '--project', project], s.tmEnv(f)).result;
+  assert.equal(claimed.code, 0, claimed.stderr);
+  await eventually(() => m.changed.length >= 1, 5000);
+  assert.ok((await m.client.listTools()).tools.length > 10);
+  assert.equal((await m.client.callTool({ name: 'inbox', arguments: {} })).isError, undefined);
+  assert.ok(m.logs.join('').includes('"event":"plugin_promoted"'), m.logs.join(''));
+  assert.ok(requestsOf(f, 'promote-s').length > 0, 'the promoted server uses the project\'s broker session');
+});
+
+// F5 end to end (D7): promotion alone must not make the hooks wake a session
+// whose host has not listed the promoted server's tools.
+test('F5: right after claim, the Stop hook does not block or open the window until the claimed session\'s MCP server has listed its tools', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
+  bindProject(project, { url: f.url, claudeSession: 'agent-1', session: 'e2e-s' });
+  const window = pathJoin(s.data, 'state', `scope-${createHash('sha256').update(fs.realpathSync(project)).digest('hex')}.json`);
+  topicHeartbeat(f.broker, 'alice', 'a');
+  const sent = f.broker.send('alice', 'a', { to: 'user:bob', body: 'pending across the claim' });
+  const m = await mcp(t, mcpEnv(s, f, 'agent-2', project));
+  const claimed = await runChannel('cli.mjs', ['claim', '--claude-session', 'agent-2', '--project', project], s.tmEnv(f)).result;
+  assert.equal(claimed.code, 0, claimed.stderr);
+  const stop = () => runChannel('stop-hook.mjs', ['--project-dir', project, '--data-dir', s.data], s.env(f), hookInput('Stop', 'agent-2')).result;
+  const early = await stop();
+  assert.equal(early.code, 0, early.stderr);
+  assert.match(JSON.parse(early.stdout).systemMessage, /^team-messaging: TOOLS_NOT_LOADED: /);
+  assert.ok(!early.stdout.includes('decision'), 'no block');
+  assert.equal(fs.existsSync(window), false, 'no window');
+  await eventually(() => m.changed.length >= 1, 5000);
+  assert.ok((await m.client.listTools()).tools.length > 10);
+  const late = await stop();
+  assert.equal(JSON.parse(late.stdout).decision, 'block', late.stdout);
+  assert.match(JSON.parse(late.stdout).reason, new RegExp(`\\(ids ${sent.id}\\)`));
+  assert.equal(fs.existsSync(window), true, 'the window opened before the block');
+});
+
+// Review r1 R2: a throw after the promoted channel started used to leave the
+// interval running, so the next tick built a second Channel on the same
+// broker session. A driver runs runInert in-process with the test-only
+// afterStart dependency (the watch.test.mjs pattern) and makes it throw once.
+test('R2: a throw after the promoted channel started never builds a second channel', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
+  bindProject(project, { url: f.url, claudeSession: 'agent-1', session: 'r2-s' });
+  const driver = `const { resolveBinding, tmOptions } = await import(${JSON.stringify(new URL('../plugin-env.mjs', import.meta.url).href)});
+    const { runInert } = await import(${JSON.stringify(new URL('../plugin-main.mjs', import.meta.url).href)});
+    const state = resolveBinding({ options: tmOptions(process.env), claudeSession: process.env.CLAUDE_CODE_SESSION_ID, projectDir: process.env.CLAUDE_PROJECT_DIR, env: process.env });
+    let thrown = false;
+    await runInert(state, { afterStart: () => { if (!thrown) { thrown = true; throw Object.assign(new Error('after start'), { code: 'TEST_AFTER_START' }); } } });`;
+  const client = new Client({ name: 'r2-driver', version: '1.0.0' }), logs = [], changed = [];
+  client.setNotificationHandler(ToolListChangedNotificationSchema, () => changed.push(Date.now()));
+  const transport = new StdioClientTransport({ command: process.execPath, args: ['--input-type=module', '--eval', driver], env: mcpEnv(s, f, 'agent-2', project, { TM_MODE: 'push' }), stderr: 'pipe' });
+  transport.stderr.on('data', chunk => logs.push(chunk.toString()));
+  t.after(() => client.close());
+  await client.connect(transport);
+  const claimed = await runChannel('cli.mjs', ['claim', '--claude-session', 'agent-2', '--project', project], s.tmEnv(f)).result;
+  assert.equal(claimed.code, 0, claimed.stderr);
+  await eventually(() => logs.join('').includes('"code":"TEST_AFTER_START"'), 5000);
+  await eventually(() => requestsOf(f, 'r2-s').some(r => r.path.startsWith('/stream')), 4000);
+  // Three more 2 s ticks: an unguarded interval would promote again.
+  await new Promise(resolve => setTimeout(resolve, 6500));
+  assert.equal(requestsOf(f, 'r2-s').filter(r => r.path.startsWith('/stream')).length, 1, 'one channel, one stream');
+  assert.equal(logs.join('').split('"code":"TEST_AFTER_START"').length - 1, 1, 'the throwing step ran once');
+  // Review r2 item 1: the channel runs, so the tools are announced anyway.
+  assert.ok(changed.length >= 1, 'tools/list_changed was sent despite the throw');
+});
+
+// Guard (green before and after the F3 change): only the session the claim names can
+// be promoted; a process without a valid session id never re-checks.
+test('F3: a session the claim does not name stays inert, and SESSION_ID_UNKNOWN never promotes', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
+  bindProject(project, { url: f.url, claudeSession: 'agent-1', session: 'guard-s' });
+  const other = await mcp(t, mcpEnv(s, f, 'agent-3', project));
+  const { CLAUDE_CODE_SESSION_ID: _drop, ...noId } = mcpEnv(s, f, 'agent-2', project);
+  const unknown = await mcp(t, noId);
+  const claimed = await runChannel('cli.mjs', ['claim', '--claude-session', 'agent-2', '--project', project], s.tmEnv(f)).result;
+  assert.equal(claimed.code, 0, claimed.stderr);
+  await new Promise(resolve => setTimeout(resolve, 5000));
+  for (const m of [other, unknown]) {
+    assert.deepEqual(m.changed, []);
+    assert.deepEqual((await m.client.listTools()).tools, []);
+    assert.ok(!m.logs.join('').includes('plugin_promoted'));
+  }
+  assert.deepEqual(requestsOf(f, 'guard-s'), []);
 });
 
 test('no project file: idle, zero broker requests, idle line', async t => {
@@ -399,7 +554,7 @@ test('a committed file with any ids stays inert and claim refuses it', async t =
     const file = writeProjectFile(project, { version: 1, claude_session_id: agent, bindings: ['default::stolen-session'], mac: 'a'.repeat(64) });
     const [start, stop, watcher] = await hooks(s, s.env(f), project, 'agent-1');
     if (agent === 'agent-1') assert.match(contextOf(start), /^team-messaging: PROJECT_OPTIONS_UNTRUSTED: /);
-    else assert.equal(contextOf(start), "team-messaging: this project's agent is Claude session someone; run /team-messaging:claim here to take over");
+    else assert.equal(contextOf(start), "team-messaging: this session is not this project's team-messaging agent (the agent is Claude session someone), so it has no team-messaging tools and is not woken for team messages. A fork or /clear gives a session a new id; if the user expects this session to be the agent, tell them to run /team-messaging:claim here.");
     assert.equal(watcher.stdout + watcher.stderr, '');
     if (agent === 'agent-1') assert.match(JSON.parse(stop.stdout).systemMessage, /^team-messaging: PROJECT_OPTIONS_UNTRUSTED: /);
     const m = await mcp(t, mcpEnv(s, f, 'agent-1', project));

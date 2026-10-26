@@ -46,7 +46,7 @@ function parse(text) { try { return JSON.parse(text); } catch { return null; } }
 // parentheses, so fields are counted after the last ')'.
 // Returns { state, start }, null when the pid is gone, or undefined when /proc
 // is absent (macOS) or unreadable, where the caller falls back to the pid check alone.
-function procStat(pid) {
+export function procStat(pid) {
   try { const rest = readFileSync(`/proc/${pid}/stat`, 'utf8'); const fields = rest.slice(rest.lastIndexOf(')') + 2).split(' '); return { state: fields[0], start: fields[19] }; }
   // Any read error other than a missing pid is doubt about /proc, not proof of
   // death, so it also falls back to the pid check.
@@ -54,7 +54,7 @@ function procStat(pid) {
 }
 // A host is alive only when its pid exists, it is not a zombie and, when the
 // lock recorded one, its start time matches. Without /proc only the pid is checked.
-function hostAlive(pid, start) {
+export function hostAlive(pid, start) {
   const stat = procStat(pid);
   if (stat === undefined) return alive(pid);
   return stat !== null && stat.state !== 'Z' && (start === undefined || stat.start === start);
