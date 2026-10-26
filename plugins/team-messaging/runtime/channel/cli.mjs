@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { dirname, resolve } from 'node:path';
+import { dirname, join as joinPath, resolve } from 'node:path';
 import { lstatSync, realpathSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { userInfo } from 'node:os';
@@ -13,6 +13,7 @@ import { Channel } from './channel.mjs';
 import { ChannelError, config, requireValue } from './config.mjs';
 import { topicPattern } from '../shared/address.mjs';
 import { brokerFetch } from './transport.mjs';
+import { bindingRoot, closeWindow } from './scope-window.mjs';
 
 const hints = {
   JOIN_NAME_MISMATCH: 'The saved credential belongs to another user; remove it or choose that user.',
@@ -132,7 +133,7 @@ export async function join(options, deps = {}) {
   const env = deps.env ?? process.env, fetcher = deps.fetch ?? brokerFetch, timeoutMs = deps.timeoutMs ?? 10000;
   const url = normaliseUrl(options.url, env), name = options.name ?? (deps.username ?? (()=>userInfo().username))();
   const path = credentialPath(url, name, { env });
-  requireValue(!options.client || ['claude','codex','claude-plugin','none'].includes(options.client), 'INVALID_CLIENT', 'Use --client claude, codex, claude-plugin or none.');
+  requireValue(!options.client || ['claude','claude-plugin','none'].includes(options.client), 'INVALID_CLIENT', 'Use --client claude, claude-plugin or none.');
   requireValue(typeof options.code === 'string' && options.code.length === 80 && /^tmi_[0-9a-f]{32}_[A-Za-z0-9_-]{43}$/.test(options.code),
     'INVALID_INVITE_CODE', 'Paste a complete invite code from the owner; use - to read it from stdin.');
   // The plugin saves these paths for its skills' shell commands; refuse before
@@ -169,7 +170,7 @@ export async function join(options, deps = {}) {
         (recovered ? ' The new credential and membership were revoked.' : ' Recovery could not be confirmed; ask the owner to remove the new membership.'));
     }
   }
-  const clients = options.client === 'none' ? [] : options.client ? [options.client] : ['claude','codex'].filter(client=>(deps.available ?? available)(client,env));
+  const clients = options.client === 'none' ? [] : options.client ? [options.client] : ['claude'].filter(client=>(deps.available ?? available)(client,env));
   const probe=statusProbe({fetcher,url,token:token??joined.token,name,workspace:joined.workspace,topic:joined.topic,timeoutMs});
   const adapters=[];for(const client of clients){
     const binding={url,workspace:joined.workspace,topic:joined.topic,path},adapterDeps={spawn:deps.spawn,env,probe,cwd:deps.cwd??process.cwd()};
@@ -363,6 +364,19 @@ function flags(args, allowed, code, hint, booleans = []) {
   return out;
 }
 const AGENT_FLAGS = ['--claude-session', '--data-dir', '--project'];
+// Review r1 C1: the human's way out of the team-message window's strict mode,
+// run from a terminal outside Claude (inside the window the agent's Bash is
+// denied, so it cannot run this). It removes the marker for the project root
+// of the current directory, or of --project-dir. The default data directory is
+// where Claude Code keeps this plugin's data: plugins/data/<plugin>-<marketplace>
+// (observed with Claude Code 2.1.310).
+const PLUGIN_DATA_NAME = 'team-messaging-team-messaging-local';
+function scopeClose(options, env) {
+  const dataDir = options.dataDir ?? joinPath(env.CLAUDE_CONFIG_DIR || joinPath(env.HOME || userInfo().homedir, '.claude'), 'plugins', 'data', PLUGIN_DATA_NAME);
+  const root = bindingRoot(resolve(options.projectDir ?? process.cwd()), { home: env.HOME });
+  if (root === null) throw new ChannelError('PROJECT_NOT_BOUND', 'This directory is not inside a bound project, so it has no team-message window.');
+  return { closed: closeWindow(dataDir, root), project_root: root };
+}
 async function main() {
   try {
     const [command,url,argument,...rest] = process.argv.slice(2);
@@ -370,6 +384,11 @@ async function main() {
       const code = command === 'status' ? 'INVALID_STATUS_ARGS' : 'INVALID_CLAIM_ARGS';
       const options = flags(process.argv.slice(3), AGENT_FLAGS, code, `Use team-messaging ${command} --claude-session id --data-dir dir [--project dir], with TM_BROKER_URL and TM_TOKEN_FILE in the environment.`);
       process.stdout.write(JSON.stringify(command === 'status' ? await status(options, process.env) : await claim(options))+'\n');
+      return;
+    }
+    if (command === 'scope-close') {
+      const options = flags(process.argv.slice(3), ['--data-dir', '--project-dir'], 'INVALID_SCOPE_CLOSE_ARGS', 'Use team-messaging scope-close [--project-dir dir] [--data-dir dir] from a terminal outside Claude.');
+      process.stdout.write(JSON.stringify(scopeClose(options, process.env)) + '\n');
       return;
     }
     if (command === 'bind') {
@@ -382,7 +401,7 @@ async function main() {
       if (result.adapters.some(adapter=>adapter.status === 'conflict')) process.exitCode = 1;
       return;
     }
-    requireValue(command === 'join' && url && argument, 'INVALID_JOIN_ARGS', 'Use team-messaging join <broker-url> <code|-> [--name user] [--client claude|codex|claude-plugin|none] [--claude-session id --data-dir dir [--project dir]].');
+    requireValue(command === 'join' && url && argument, 'INVALID_JOIN_ARGS', 'Use team-messaging join <broker-url> <code|-> [--name user] [--client claude|claude-plugin|none] [--claude-session id --data-dir dir [--project dir]].');
     const options = { ...flags(rest, ['--name','--client',...AGENT_FLAGS], 'INVALID_JOIN_ARGS', 'Pass each supported option once with its value.'), url };
     // Refuse unsafe transport before reading stdin, as well as before network access.
     normaliseUrl(url);

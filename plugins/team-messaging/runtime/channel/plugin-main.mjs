@@ -14,7 +14,12 @@ if (Number(process.versions.node.split('.')[0]) < 24) {
 const plugin = resolveBinding({ options: tmOptions(process.env), claudeSession: process.env.CLAUDE_CODE_SESSION_ID, projectDir: process.env.CLAUDE_PROJECT_DIR, env: process.env });
 if (plugin.state === 'active') {
   const { runStdio } = await import('./main.mjs');
-  await runStdio(plugin.env, { plugin: true, isActive: agentCheck(plugin, { projectDir: process.env.CLAUDE_PROJECT_DIR, env: process.env }) });
+  // Project-scoped sharing P3a: the team-message window marker lives in the
+  // plugin data directory and is keyed by the project root. A missing or
+  // relative CLAUDE_PLUGIN_DATA makes every teammate-bearing result
+  // SCOPE_WINDOW_UNAVAILABLE (openWindow refuses it), which fails closed.
+  const scope = { dataDir: process.env.CLAUDE_PLUGIN_DATA, session: process.env.CLAUDE_CODE_SESSION_ID, root: plugin.root, user: plugin.user };
+  await runStdio(plugin.env, { plugin: true, isActive: agentCheck(plugin, { projectDir: process.env.CLAUDE_PROJECT_DIR, env: process.env }), scope });
 } else await runInert(plugin);
 
 // The inert server: tools [] and NOT_AGENT_SESSION for any call, with no

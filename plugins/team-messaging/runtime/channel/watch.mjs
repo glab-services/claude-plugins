@@ -6,7 +6,8 @@ import { config, requireValue } from './config.mjs';
 import { Channel } from './channel.mjs';
 import { agentCheck, hookOptions, localError, resolveBinding, tmOptions } from './plugin-env.mjs';
 import { readSessionRecord } from './project-options.mjs';
-import { acquireLock, claimUnreported, markEnded, stateDir, unclaim } from './watch-state.mjs';
+import { acquireLock, claimUnreported, markEnded, reported, stateDir, unclaim } from './watch-state.mjs';
+import { openWindow } from './scope-window.mjs';
 
 // The Stop hook entry in plugin/hooks/hooks.json uses HOOK_TIMEOUT_S. Its
 // watcher must exit first: hooks.md says "Claude Code still enforces
@@ -130,6 +131,11 @@ export async function watch(argv = process.argv.slice(2), env = process.env, { a
         // new host's watcher would never wake for them (decision 151).
         if (orphaned() || !stillAgent()) return 0;
         backoff = pollMs;
+        // Review r1 S5: a wake for teammate messages opens the team-message
+        // window first. If it cannot be written, nothing is claimed and the
+        // watcher keeps retrying without waking (the messages stay pending).
+        const known = new Set(reported(dir, key));
+        if (messages.some(message => !known.has(message.id) && message.from_user !== plugin.user)) openWindow(options['data-dir'], claudeSession, plugin.root, { home: env.HOME });
         const claimed = await claimUnreported(dir, key, messages.map(message => message.id)), fresh = new Set(claimed);
         if (claimed.length && afterClaim) await bounded(Promise.resolve().then(afterClaim));
         // Stopped by a signal after claiming: nothing will be printed, so the
