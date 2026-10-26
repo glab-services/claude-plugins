@@ -19,7 +19,7 @@ Run this in the Claude session that should be this project's agent session: only
 
    Never `cat`, `echo` or print the invite file, and never pass the code as an argument. The command saves a mode-0600 credential, writes only its path to the plugin configuration, and records this session as the project's agent in `.claude/settings.local.json`.
 3. Read the JSON result. `adapters[0].status` is:
-   - `registered`: tell the user to delete the invite file, then relay the `hint`: reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect), or restart with `claude --continue` when the credential was just saved.
+   - `registered`: tell the user to delete the invite file, then relay the `hint`: the tools appear within a few seconds; if they do not, reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect). Restart with `claude --continue` when the credential was just saved.
    - `conflict`, `failed` or `manual`: show the `hint` and stop. At this point the invite was already used; once the plugin is fixed, ask the owner for a new invite.
    If `legacy_registration` is present, relay its hint: an older MCP registration for the same binding would run a second channel.
 4. An error comes back as `{error, hint}` on stderr; show the hint. Before using the invite, the command checks the project and the plugin; for these errors the invite was not used:

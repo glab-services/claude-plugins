@@ -6,6 +6,7 @@ import { directoryProblem, hookArgs, localError, resolveBinding } from './plugin
 import { CLAUDE_SESSION, writeSessionRecord } from './project-options.mjs';
 import { sessionStartOutput } from './session-start.mjs';
 import { openWindow } from './scope-window.mjs';
+import { serving } from './agent-live.mjs';
 
 const FETCH_DEADLINE_MS = 10000;
 const ARM_TEXT = {
@@ -18,13 +19,23 @@ const ARM_TEXT = {
 const IDLE = 'team-messaging is idle in this project; run /team-messaging:bind or /team-messaging:join in the session that should be the agent';
 // P-15: a 0.9 global binding is ignored; its workspace only words the hint.
 const ADOPT = workspace => ` (the plugin still holds a 0.9 binding to workspace ${workspace}, which 0.10 ignores; to keep it, run /team-messaging:bind --adopt-global in the agent session)`;
-const INERT = agent => `team-messaging: this project's agent is Claude session ${CLAUDE_SESSION.test(agent ?? '') ? agent : '(unknown)'}; run /team-messaging:claim here to take over`;
+// 0.11.1 F1 (D2): a fork or /clear gives a session a new id, so the agent
+// can silently become inert. INERT reaches only the model; INERT_NOTICE is a
+// systemMessage, which the host shows to the human. It shows at every
+// SessionStart of a non-agent session, a deliberate second session included:
+// a fork cannot be told from one, and a wrong silence is the bug.
+const agentId = agent => CLAUDE_SESSION.test(agent ?? '') ? agent : '(unknown)';
+const INERT = agent => `team-messaging: this session is not this project's team-messaging agent (the agent is Claude session ${agentId(agent)}), so it has no team-messaging tools and is not woken for team messages. A fork or /clear gives a session a new id; if the user expects this session to be the agent, tell them to run /team-messaging:claim here.`;
+const INERT_NOTICE = agent => `team-messaging: this session is not the project's agent (agent: Claude session ${agentId(agent)}). If it replaced the agent after a fork or /clear, run /team-messaging:claim here.`;
 const ACTIVE = ({ binding, root }) => `team-messaging: agent session for workspace ${binding.workspace}${binding.topic === null ? '' : `, topic ${binding.topic}`}, project root ${root}`;
 // Project-scoped sharing P4 (L1): follows ACTIVE in every active state. At
 // most 120 characters (FA-16), so the largest context stays under the host's
 // 10,000-character limit.
 const SCOPE = 'team-messaging: share only project content and project-relative paths, nothing about this machine or outside the root.';
 const SCOPE_UNAVAILABLE = 'team-messaging: SCOPE_WINDOW_UNAVAILABLE: the team-message window could not be recorded, so pending messages are not shown here; check the plugin data directory, then use inbox.';
+// 0.11.1 F5 (D5): context only, no systemMessage, because a startup race with
+// the MCP server is normal; the SessionStart watcher wakes once it serves.
+const TOOLS_NOT_LOADED = "team-messaging: TOOLS_NOT_LOADED: team messages are pending but not shown, because this session's team-messaging tools are not loaded yet. Once they load, call inbox; if they do not appear, ask the user to reconnect the team-messaging MCP server.";
 
 async function pluginSessionStart(env = process.env, argv = process.argv.slice(2)) {
   let event, context = null, timer, fetched = null;
@@ -49,7 +60,7 @@ async function pluginSessionStart(env = process.env, argv = process.argv.slice(2
   try { writeSessionRecord(args.dataDir, event?.session_id, args.projectDir, { home: env.HOME }); }
   catch (error) { problem = directoryProblem(fail(error)); }
   if (plugin.state === 'idle') return write([problem, IDLE + (/^[A-Za-z0-9_.-]{1,128}$/.test(args.options.workspace) ? ADOPT(args.options.workspace) : '')].filter(Boolean).join('\n\n'));
-  if (plugin.state === 'inert') return write([problem, INERT(plugin.agent)].filter(Boolean).join('\n\n'));
+  if (plugin.state === 'inert') return write([problem, INERT(plugin.agent)].filter(Boolean).join('\n\n'), INERT_NOTICE(plugin.agent));
   if (plugin.state === 'invalid') return write([problem, `team-messaging: ${plugin.code}: ${plugin.hint}`].filter(Boolean).join('\n\n'));
   if (problem) return write([problem, ACTIVE(plugin), SCOPE, ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
   try {
@@ -72,14 +83,20 @@ async function pluginSessionStart(env = process.env, argv = process.argv.slice(2
   // window first. Only a fetched list opens it, never a fetch failure or a
   // directory problem. FA-5: if the window cannot be written, the messages
   // are left out and the session is told why.
+  // F5 (D4): only while this session's MCP server serves its tools; otherwise
+  // the messages are left out and no window opens.
   if (fetched?.additionalContext != null) {
-    try { openWindow(args.dataDir, event.session_id, plugin.root, { home: env.HOME }); }
-    catch (error) { fail(error); context = SCOPE_UNAVAILABLE; }
+    if (!serving(args.dataDir, event.session_id, plugin.root, { home: env.HOME })) context = TOOLS_NOT_LOADED;
+    else {
+      try { openWindow(args.dataDir, event.session_id, plugin.root, { home: env.HOME }); }
+      catch (error) { fail(error); context = SCOPE_UNAVAILABLE; }
+    }
   }
   write([context, ACTIVE(plugin), SCOPE, ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
 }
-function write(text) {
-  if (text) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n');
+// systemMessage (optional) is shown to the user; additionalContext reaches only the model.
+function write(text, systemMessage) {
+  if (text) process.stdout.write(JSON.stringify({ ...(systemMessage ? { systemMessage } : {}), hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n');
 }
 function fail(error) {
   // A broker outage must not prevent the host from starting. Never echo input or credentials.

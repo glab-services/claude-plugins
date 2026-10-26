@@ -8,6 +8,7 @@ import { agentCheck, hookOptions, localError, resolveBinding, tmOptions } from '
 import { readSessionRecord } from './project-options.mjs';
 import { acquireLock, claimUnreported, markEnded, reported, stateDir, unclaim } from './watch-state.mjs';
 import { openWindow } from './scope-window.mjs';
+import { serving } from './agent-live.mjs';
 
 // The Stop hook entry in plugin/hooks/hooks.json uses HOOK_TIMEOUT_S. Its
 // watcher must exit first: hooks.md says "Claude Code still enforces
@@ -131,6 +132,12 @@ export async function watch(argv = process.argv.slice(2), env = process.env, { a
         // new host's watcher would never wake for them (decision 151).
         if (orphaned() || !stillAgent()) return 0;
         backoff = pollMs;
+        // 0.11.1 F5 (D5): no open, claim or wake while this session's MCP
+        // server has not listed its tools: the woken session could not read or
+        // ack, and the window would trap it. The watcher keeps polling, so it
+        // wakes once the server serves. The terminal-code wake below is not
+        // gated: it carries no teammate content and opens no window.
+        if (!serving(options['data-dir'], claudeSession, plugin.root, { home: env.HOME })) { await pause(pollMs); continue; }
         // Review r1 S5: a wake for teammate messages opens the team-message
         // window first. If it cannot be written, nothing is claimed and the
         // watcher keeps retrying without waking (the messages stay pending).
