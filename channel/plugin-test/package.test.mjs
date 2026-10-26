@@ -53,7 +53,7 @@ test('SessionStart arms the rewake watcher with the Stop watcher\'s command and 
   const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks;
   const watcher = { type: 'command', command: 'node', args: ['--use-system-ca', '${CLAUDE_PLUGIN_ROOT}/runtime/channel/watch.mjs', '--mode', 'rewake', '--data-dir', '${CLAUDE_PLUGIN_DATA}', '--project-dir', '${CLAUDE_PROJECT_DIR}'], asyncRewake: true, timeout: HOOK_TIMEOUT_S };
   assert.equal(hooks.SessionStart.length, 1);
-  assert.equal(hooks.SessionStart[0].matcher, 'startup|resume|clear|compact');
+  assert.equal(hooks.SessionStart[0].matcher, 'startup|resume|clear|compact|fork');
   assert.deepEqual(hooks.SessionStart[0].hooks.filter(hook => hook.args.some(arg => arg.endsWith('/watch.mjs'))), [watcher]);
   assert.deepEqual(hooks.Stop[0].hooks.filter(hook => hook.args.some(arg => arg.endsWith('/watch.mjs'))), [watcher], 'same entry as the Stop watcher');
   assert.deepEqual(hooks.SessionStart[0].hooks.map(hook => hook.args[1].split('/').pop()), ['plugin-session-start.mjs', 'watch.mjs']);
@@ -64,6 +64,16 @@ test('SessionStart arms the rewake watcher with the Stop watcher\'s command and 
   for (const hook of Object.values(hooks).flat().flatMap(entry => entry.hooks)) for (const arg of hook.args.filter(value => value.includes('${')))
     assert.ok(arg.startsWith('${CLAUDE_PLUGIN_ROOT}/runtime/') || ['${CLAUDE_PROJECT_DIR}', '${CLAUDE_PLUGIN_DATA}'].includes(arg), arg);
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(join(plugin, '.mcp.json'), 'utf8')).mcpServers['team-messaging'].env), ['TM_BROKER_URL', 'TM_TOKEN_FILE', 'TM_MODE', 'TM_ARM']);
+});
+
+// 0.11.1 D1 (F2): hooks.md documents the SessionStart sources startup, resume,
+// clear, compact and fork. A forked session (--fork-session, /branch, the /fork
+// copy) used to match none of ours, so it got no session record, no notice and
+// no watcher. The host matches the whole source against the matcher.
+test('the SessionStart matcher covers every documented source, fork included', () => {
+  const matcher = new RegExp('^(?:' + JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks.SessionStart[0].matcher + ')$');
+  for (const source of ['startup', 'resume', 'clear', 'compact', 'fork']) assert.ok(matcher.test(source), source);
+  assert.equal(matcher.test('other'), false);
 });
 
 test('every path the manifests and skills name exists, and no runtime import leaves the plugin root', () => {

@@ -219,6 +219,21 @@ test('claim moves the agent; the old MCP refuses its next call and stops within 
   assert.equal(again.status, 'already_agent');
 });
 
+// F2 (acceptance fixes): a forked session has a new id and no record until its own
+// SessionStart (source fork, D1) writes one; claim then finds the project
+// from that record, as the claim skill passes no --project. Chain coverage:
+// the hook writes the record for any source it is started with.
+test('F2: after a fork SessionStart, claim finds the project from the session record without --project', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
+  bindProject(project, { url: f.url, claudeSession: 'agent-1' });
+  const forked = await runChannel('plugin-session-start.mjs', ['--project-dir', project, '--data-dir', s.data], s.env(f), JSON.stringify({ hook_event_name: 'SessionStart', session_id: 'agent-2', source: 'fork' })).result;
+  assert.equal(forked.code, 0, forked.stderr);
+  const claimed = await runChannel('cli.mjs', ['claim', '--claude-session', 'agent-2', '--data-dir', s.data], s.tmEnv(f)).result;
+  assert.equal(claimed.code, 0, claimed.stderr);
+  assert.equal(JSON.parse(claimed.stdout).status, 'claimed');
+  assert.equal(findProject(project).options.claude_session_id, 'agent-2');
+});
+
 test('no project file: idle, zero broker requests, idle line', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = gitDir(s.dir, 'project');
   const [start, stop, watcher] = await hooks(s, s.env(f), project, 'any');
