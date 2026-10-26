@@ -116,7 +116,8 @@ export async function freezingProxy(t, fixture) {
 // Claude session. `tokenFile` is a hand-named credential, which AM-2 refuses;
 // env() saves the token where join does for that broker URL.
 // - env(fixture, extra): the hook env (CLAUDE_PLUGIN_OPTION_*);
-// - tmEnv(fixture, extra): the MCP, CLI and Bash-watcher env (TM_*);
+// - tmEnv(fixture, extra): the MCP, CLI and Bash-watcher env (TM_*, and
+//   CLAUDE_PLUGIN_DATA for the MCP server's team-message window);
 // - project(fixture, key, binding): a project bound to Claude session `key`;
 // - unbound(): a project without a binding;
 // - hook(fixture, key, binding): the hook args --project-dir and --data-dir;
@@ -130,7 +131,9 @@ export function pluginScratch(t, { token = tokens.bob } = {}) {
   const credential = (fixture, name = 'bob', secret = token) => credentialScratch(s, fixture.url, { name, token: secret });
   const projects = new Map();
   s.env = (fixture, extra = {}) => ({ HOME: home, TMPDIR: process.env.TMPDIR, CLAUDE_PLUGIN_DATA: data, CLAUDE_PLUGIN_OPTION_BROKER_URL: fixture.url, CLAUDE_PLUGIN_OPTION_TOKEN_FILE: credential(fixture), ...extra });
-  s.tmEnv = (fixture, extra = {}) => ({ HOME: home, TMPDIR: process.env.TMPDIR, TM_BROKER_URL: fixture.url, TM_TOKEN_FILE: credential(fixture), ...extra });
+  // FA-3 (project-scoped sharing): the MCP server writes the team-message
+  // window under CLAUDE_PLUGIN_DATA, which Claude Code exports to it.
+  s.tmEnv = (fixture, extra = {}) => ({ HOME: home, TMPDIR: process.env.TMPDIR, CLAUDE_PLUGIN_DATA: data, TM_BROKER_URL: fixture.url, TM_TOKEN_FILE: credential(fixture), ...extra });
   s.project = (fixture, key, binding = {}) => {
     const id = JSON.stringify([fixture.url, key, binding.workspace, binding.topic, binding.session, binding.token]);
     if (!projects.has(id)) {

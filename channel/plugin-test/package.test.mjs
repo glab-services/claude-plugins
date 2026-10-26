@@ -71,7 +71,7 @@ test('every path the manifests and skills name exists, and no runtime import lea
   const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks, mcp = JSON.parse(readFileSync(join(plugin, '.mcp.json'), 'utf8')).mcpServers;
   const args = [...Object.values(hooks).flat().flatMap(entry => entry.hooks).flatMap(hook => hook.args), ...Object.values(mcp).flatMap(server => server.args)];
   const files = args.filter(arg => arg.startsWith('${CLAUDE_PLUGIN_ROOT}')).map(substitute);
-  assert.equal(files.length, 5);
+  assert.equal(files.length, 8);
   for (const file of files) assert.ok(existsSync(file), file);
   for (const skill of readdirSync(join(plugin, 'skills'))) {
     const text = readFileSync(join(plugin, 'skills', skill, 'SKILL.md'), 'utf8');
@@ -87,6 +87,23 @@ test('every path the manifests and skills name exists, and no runtime import lea
     }
   }
   assert.equal(relative(plugin, join(runtime, 'channel', '..', 'shared', 'address.mjs')).startsWith('..'), false);
+});
+
+// Project-scoped sharing P3b, FA-1, FA-2, FD-1: the deny-only scope hook on
+// every tool call and at both Stop events, with one fixed argument form, a
+// 10 s timeout and no onFailure key (D-25). UserPromptSubmit stays unused
+// (manager decision on R-7). The built bundle is checked, not the source.
+test('the scope hook runs on PreToolUse, Stop and StopFailure with --event, --project-dir and --data-dir only', () => {
+  const hooks = JSON.parse(readFileSync(join(plugin, 'hooks', 'hooks.json'), 'utf8')).hooks;
+  const scope = event => ({ type: 'command', command: 'node', args: ['--use-system-ca', '${CLAUDE_PLUGIN_ROOT}/runtime/channel/scope-hook.mjs', '--event', event, '--project-dir', '${CLAUDE_PROJECT_DIR}', '--data-dir', '${CLAUDE_PLUGIN_DATA}'], timeout: 10 });
+  assert.deepEqual(hooks.PreToolUse, [{ matcher: '*', hooks: [scope('pre')] }]);
+  assert.equal(Object.hasOwn(hooks.PreToolUse[0].hooks[0], 'onFailure'), false);
+  assert.equal(hooks.Stop.length, 1); assert.equal(hooks.Stop[0].hooks.length, 3);
+  assert.deepEqual(hooks.Stop[0].hooks[2], scope('stop'));
+  assert.deepEqual(hooks.StopFailure, [{ hooks: [scope('stop-failure')] }]);
+  assert.equal(Object.hasOwn(hooks, 'UserPromptSubmit'), false);
+  assert.deepEqual(Object.keys(hooks).sort(), ['PreToolUse', 'SessionStart', 'Stop', 'StopFailure']);
+  for (const hook of Object.values(hooks).flat().flatMap(entry => entry.hooks)) assert.equal(Object.hasOwn(hook, 'onFailure'), false);
 });
 
 function bundled(f, s, env) {

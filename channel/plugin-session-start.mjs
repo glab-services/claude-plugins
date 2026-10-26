@@ -5,6 +5,7 @@ import { requireValue } from './config.mjs';
 import { directoryProblem, hookArgs, localError, resolveBinding } from './plugin-env.mjs';
 import { CLAUDE_SESSION, writeSessionRecord } from './project-options.mjs';
 import { sessionStartOutput } from './session-start.mjs';
+import { openWindow } from './scope-window.mjs';
 
 const FETCH_DEADLINE_MS = 10000;
 const ARM_TEXT = {
@@ -19,9 +20,14 @@ const IDLE = 'team-messaging is idle in this project; run /team-messaging:bind o
 const ADOPT = workspace => ` (the plugin still holds a 0.9 binding to workspace ${workspace}, which 0.10 ignores; to keep it, run /team-messaging:bind --adopt-global in the agent session)`;
 const INERT = agent => `team-messaging: this project's agent is Claude session ${CLAUDE_SESSION.test(agent ?? '') ? agent : '(unknown)'}; run /team-messaging:claim here to take over`;
 const ACTIVE = ({ binding, root }) => `team-messaging: agent session for workspace ${binding.workspace}${binding.topic === null ? '' : `, topic ${binding.topic}`}, project root ${root}`;
+// Project-scoped sharing P4 (L1): follows ACTIVE in every active state. At
+// most 120 characters (FA-16), so the largest context stays under the host's
+// 10,000-character limit.
+const SCOPE = 'team-messaging: share only project content and project-relative paths, nothing about this machine or outside the root.';
+const SCOPE_UNAVAILABLE = 'team-messaging: SCOPE_WINDOW_UNAVAILABLE: the team-message window could not be recorded, so pending messages are not shown here; check the plugin data directory, then use inbox.';
 
 async function pluginSessionStart(env = process.env, argv = process.argv.slice(2)) {
-  let event, context = null, timer;
+  let event, context = null, timer, fetched = null;
   try {
     const inputLimit = Number(env.HOOK_INPUT_MAX_BYTES ?? 65536);
     requireValue(Number.isSafeInteger(inputLimit) && inputLimit > 0, 'INVALID_HOOK_INPUT_LIMIT', 'Set HOOK_INPUT_MAX_BYTES to a positive integer.');
@@ -45,11 +51,11 @@ async function pluginSessionStart(env = process.env, argv = process.argv.slice(2
   if (plugin.state === 'idle') return write([problem, IDLE + (/^[A-Za-z0-9_.-]{1,128}$/.test(args.options.workspace) ? ADOPT(args.options.workspace) : '')].filter(Boolean).join('\n\n'));
   if (plugin.state === 'inert') return write([problem, INERT(plugin.agent)].filter(Boolean).join('\n\n'));
   if (plugin.state === 'invalid') return write([problem, `team-messaging: ${plugin.code}: ${plugin.hint}`].filter(Boolean).join('\n\n'));
-  if (problem) return write([problem, ACTIVE(plugin), ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
+  if (problem) return write([problem, ACTIVE(plugin), SCOPE, ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
   try {
     // The deadline bounds only the fetch; past it the hook still starts the
     // session with its arm text and no messages.
-    const fetched = await Promise.race([
+    fetched = await Promise.race([
       sessionStartOutput({ ...plugin.env, CHANNEL_MODE: 'poll' }, event, { limit: env.HOOK_MESSAGE_LIMIT, contextLimit: env.HOOK_CONTEXT_MAX_CHARS }),
       new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('deadline'), { code: 'SESSION_START_DEADLINE', hint: 'The broker did not answer within 10 s; use inbox.' })), FETCH_DEADLINE_MS); }),
     ]);
@@ -61,8 +67,16 @@ async function pluginSessionStart(env = process.env, argv = process.argv.slice(2
     // The watcher is the only path that claims and wakes, so a message pending
     // at startup is in the context and also wakes once; ack dedupes that.
     context = fetched.additionalContext;
-  } catch (error) { clearTimeout(timer); context = directoryProblem(fail(error)); }
-  write([context, ACTIVE(plugin), ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
+  } catch (error) { clearTimeout(timer); context = directoryProblem(fail(error)); fetched = null; }
+  // D-11: pending teammate messages in the context open the team-message
+  // window first. Only a fetched list opens it, never a fetch failure or a
+  // directory problem. FA-5: if the window cannot be written, the messages
+  // are left out and the session is told why.
+  if (fetched?.additionalContext != null) {
+    try { openWindow(args.dataDir, event.session_id, plugin.root, { home: env.HOME }); }
+    catch (error) { fail(error); context = SCOPE_UNAVAILABLE; }
+  }
+  write([context, ACTIVE(plugin), SCOPE, ARM_TEXT[plugin.arm]].filter(Boolean).join('\n\n'));
 }
 function write(text) {
   if (text) process.stdout.write(JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: text } }) + '\n');

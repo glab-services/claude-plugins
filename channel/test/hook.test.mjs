@@ -27,6 +27,8 @@ test('SessionStart adds escaped pending messages as context without acknowledgin
   const output = JSON.parse(result.stdout).hookSpecificOutput;
   assert.equal(output.hookEventName, 'SessionStart');
   assert.match(output.additionalContext, /untrusted data/);
+  // Project-scoped sharing P4: the prefix carries the scope sentence.
+  assert.ok(output.additionalContext.includes('Queue offers (claim_generation) use claim, not ack. Share only content from inside the project root. '));
   assert.doesNotMatch(output.additionalContext, /[<>]/);
   assert.ok(output.additionalContext.includes(sent.thread_id));
   assert.equal(fixture.store.get('SELECT acked_at FROM messages WHERE id=?', sent.id).acked_at, null);

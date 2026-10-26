@@ -1,9 +1,14 @@
 import { topicPattern } from '../shared/address.mjs';
 import { randomUUID } from 'node:crypto';
 import { readCredential } from './credentials.mjs';
+import { RULES } from './outbound-scope.mjs';
 
+// D-8 (project-scoped sharing): an OUTBOUND_SCOPE refusal keeps its
+// `<rule>:<field>` reason, built locally from the closed rule list and a field
+// name. Any other reason, including one a broker sends, is dropped, as before.
+const OUTBOUND_REASON = new RegExp(`^(${RULES.join('|')}):[a-z_]+(\\[\\d+\\])?$`);
 export class ChannelError extends Error {
-  constructor(code, hint,reason) { super(code); this.code = code; this.hint = hint; if(code==='SESSION_ENDED'&&['topic_left','membership_ended'].includes(reason))this.reason=reason; }
+  constructor(code, hint,reason) { super(code); this.code = code; this.hint = hint; if(code==='SESSION_ENDED'&&['topic_left','membership_ended'].includes(reason))this.reason=reason; else if(code==='OUTBOUND_SCOPE'&&typeof reason==='string'&&OUTBOUND_REASON.test(reason))this.reason=reason; }
 }
 export function requireValue(condition, code, hint,reason) {
   if (!condition) throw new ChannelError(code, hint,reason);
