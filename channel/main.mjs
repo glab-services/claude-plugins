@@ -6,10 +6,11 @@ import { config } from './config.mjs';
 import { createChannelServer } from './server.mjs';
 
 // isActive (plugin-main.mjs, plan project-options AM-6) is passed through to
-// the server; without it the server is always active, as before.
-export async function runStdio(env, { plugin = false, isActive } = {}) {
+// the server; without it the server is always active, as before. So is scope
+// (project-scoped sharing P3a), which only plugin-main.mjs passes.
+export async function runStdio(env, { plugin = false, isActive, scope } = {}) {
   try {
-    const { server, channel, recordHostRequest } = createChannelServer(config(env), undefined, { onIdle: stop, plugin, isActive });
+    const { server, channel, recordHostRequest } = createChannelServer(config(env), undefined, { onIdle: stop, plugin, isActive, scope });
     let stopping;
     function stop() { return stopping ??= (async () => { await channel.stop(); await server.close(); })(); }
     process.once('SIGINT', () => { void stop(); });

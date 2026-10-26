@@ -111,7 +111,9 @@ export function resolveBinding({ options = {}, claudeSession, projectDir, env = 
     if (claudeSession !== agent) return { state: 'inert', code: 'NOT_AGENT_SESSION', agent, root, arm, binding: found.binding };
     if (!options.broker_url || !options.token_file) return refuse('PLUGIN_NOT_CONFIGURED', { arm });
     const url = normaliseUrl(options.broker_url, env), credentialEnv = { HOME: env.HOME, XDG_CONFIG_HOME: env.XDG_CONFIG_HOME };
-    credentialName(url, options.token_file, { env: credentialEnv });
+    // Project-scoped sharing P3a: the broker name in the credential's file name
+    // is this session's own user, which the outbound guard and the window use.
+    const user = credentialName(url, options.token_file, { env: credentialEnv });
     if (!verifyMac(readCredential(options.token_file, { home: env.HOME }), found, url)) return refuse('PROJECT_OPTIONS_UNTRUSTED', { arm });
     const { workspace, topic, session_id } = found.binding;
     // Only the binding and the credential-path inputs pass through, so an
@@ -120,7 +122,7 @@ export function resolveBinding({ options = {}, claudeSession, projectDir, env = 
     // plugin default (decision 118).
     const mapped = { BROKER_URL: url, BROKER_TOKEN_FILE: options.token_file, CHANNEL_WORKSPACE: workspace, ...(topic === null ? {} : { CHANNEL_TOPIC: topic }), CHANNEL_SESSION_ID: session_id, CHANNEL_MODE: options.mode || 'poll' };
     for (const key of ['HOME', 'XDG_CONFIG_HOME']) if (env[key]) mapped[key] = env[key];
-    return { state: 'active', arm, env: mapped, root, agent, binding: found.binding, path: found.path, identity: found.identity, mac: found.options.mac, bindings: found.options.bindings };
+    return { state: 'active', arm, env: mapped, root, agent, user, binding: found.binding, path: found.path, identity: found.identity, mac: found.options.mac, bindings: found.options.bindings };
   } catch (error) {
     const safe = localError(error, 'Check the plugin configuration.');
     return { state: 'invalid', code: safe.code ?? 'PLUGIN_NOT_CONFIGURED', hint: safe.hint };

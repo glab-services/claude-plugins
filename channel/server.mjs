@@ -3,6 +3,8 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprot
 import * as z from 'zod/v4';
 import { Channel } from './channel.mjs';
 import { ChannelError } from './config.mjs';
+import { checkOutbound, OUTBOUND_HINT, projectDirNames, projectFileNames, SCOPE_INSTRUCTIONS } from './outbound-scope.mjs';
+import { openWindow } from './scope-window.mjs';
 import { addressPattern, topicPattern } from '../shared/address.mjs';
 import { VERSION } from './version.mjs';
 
@@ -66,7 +68,20 @@ const definitions = [
 // server is always active (main.mjs).
 const ACTIVE_CHECK_MS = 5000;
 const NOT_AGENT = { error: 'NOT_AGENT_SESSION', hint: 'This Claude session is no longer the agent session of this project; the tools stopped. Use the agent session, or run /team-messaging:claim here and reconnect the MCP server.' };
-export function createChannelServer(settings, log, { onIdle, plugin = false, isActive } = {}) {
+// Project-scoped sharing D-3: the field class of each argument the guard
+// scans. Free text and paths also get the path rules; every other string
+// (to, topic, name, since, workstream, user, invite_id, topics[]) is a name.
+const FREE_TEXT = new Set(['body', 'summary', 'result', 'contracts', 'thread_id']);
+const fieldClass = (tool, key) => FREE_TEXT.has(key) ? 'free' : tool === 'register_workstream' && key === 'paths' ? 'path' : 'name';
+// D-10: the tools whose results carry teammate text when an entry comes from
+// another user. ack and claim open on success; check_overlap names owners.
+const TEAMMATE_RESULTS = new Set(['inbox', 'wait', 'pins', 'dead_letters', 'queue_item', 'list_decisions']);
+const MEMBERS_TTL_MS = 60000;
+// scope (plugin mode only, from plugin-main.mjs) is {dataDir, session, root,
+// user}: where the team-message window marker lives, the project root and
+// this session's broker name. Without it (the standalone channel) no window
+// is written; the outbound guard runs either way.
+export function createChannelServer(settings, log, { onIdle, plugin = false, isActive, scope } = {}) {
   const bindingDefinitions=definitions.map(([name,description,schema,annotations])=>[name,description,settings.topic==null&&['send','ask'].includes(name)?schema.extend({topic:topicName.optional()}).strict():schema,annotations]);
   // This capability and notification shape follow the Claude channels reference and peer server.
   const server = new Server({ name: 'team-messaging', version: VERSION }, {
@@ -82,9 +97,68 @@ Broadcast topic acks are independent per user; the first session of your user ow
 Skip is the only deliberate topic cursor gap jump; keep pins without acknowledging. Neither operation deletes messages.
 Queue offers carry claim_generation: use claim/renew/done, never ack or topic replies. escalation and notice are broker notices: ack them, do not reply. Carry the returned generation and make effects idempotent: processing is at-least-once, with one accepted terminal completion.
 Only a human CLI can resolve or reopen escalated threads.
-This channel stays bound to workspace ${settings.workspace}${settings.topic==null?' at workspace level':` > topic ${settings.topic}`}; create_workspace never changes its binding. A workspace-level owner can name topic when starting a direct user message; replies retain their thread topic.`,
+This channel stays bound to workspace ${settings.workspace}${settings.topic==null?' at workspace level':` > topic ${settings.topic}`}; create_workspace never changes its binding. A workspace-level owner can name topic when starting a direct user message; replies retain their thread topic.
+${SCOPE_INSTRUCTIONS}`,
   });
-  const channel = new Channel(settings, params => server.notification({ method: 'notifications/claude/channel', params }), log);
+  // D-10: the window opens before teammate content leaves this process. A push
+  // whose window write fails is dropped: Channel.push catches the throw, and
+  // the message stays buffered and unacked, so inbox still lists it.
+  // Review r1 C7: only a message push from another user opens it; claim and
+  // removal notices carry no teammate text and are delivered as they are.
+  const open = () => openWindow(scope.dataDir, scope.session, scope.root);
+  const notify = params => {
+    if (scope && params.meta?.event === 'message' && params.meta.from_user !== scope.user) {
+      try { open(); } catch (error) { channel.log({ event: 'scope_window_unavailable' }); throw error; }
+    }
+    return server.notification({ method: 'notifications/claude/channel', params });
+  };
+  const channel = new Channel(settings, notify, log);
+  // FA-15: the guard is synchronous and reads only cached names. The members
+  // list is refreshed in the background at start and when older than 60 s; a
+  // failure keeps the last list. An empty list only narrows the exemptions.
+  const members = { at: 0, names: [], pending: null };
+  const refreshMembers = () => {
+    if (members.pending) return;
+    members.pending = channel.api('/members')
+      .then(result => { if (Array.isArray(result?.members)) members.names = result.members.map(member => member?.user).filter(name => typeof name === 'string'); })
+      .catch(() => {})
+      .finally(() => { members.at = Date.now(); members.pending = null; });
+  };
+  // config() already parsed settings.url, so this cannot throw.
+  const brokerHost = new URL(settings.url).hostname;
+  // D-3, D-6, D-8: every string of every tool that reaches the broker is
+  // checked before the request; wait reads only the local buffer.
+  const guardOutbound = (tool, args) => {
+    if (tool === 'wait') return;
+    const fields = [];
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value === 'string') fields.push({ field: key, value, cls: fieldClass(tool, key) });
+      else if (Array.isArray(value)) value.forEach((item, i) => { if (typeof item === 'string') fields.push({ field: `${key}[${i}]`, value: item, cls: fieldClass(tool, key) }); });
+    }
+    if (Date.now() - members.at > MEMBERS_TTL_MS) refreshMembers();
+    const names = [settings.workspace, settings.topic, scope?.user, ...members.names, ...[...channel.buffer.values()].map(entry => entry.message.from_user)].filter(name => typeof name === 'string');
+    // Review r2 CC1: the file names come from the same cached walk as dirs.
+    const refused = checkOutbound(fields, { names, strip: [brokerHost], dirs: scope?.root ? projectDirNames(scope.root) : null, files: scope?.root ? projectFileNames(scope.root) : null });
+    if (!refused) return;
+    // The matched text is never logged or echoed; only the reason is.
+    channel.log({ event: 'outbound_refused', reason: `${refused.rule}:${refused.field}` });
+    throw new ChannelError('OUTBOUND_SCOPE', OUTBOUND_HINT, `${refused.rule}:${refused.field}`);
+  };
+  // Whether a result holds an entry whose `key` names another user. Without a
+  // known own name every named entry counts (fail closed).
+  const fromOther = (value, key) => {
+    const stack = [value];
+    while (stack.length) {
+      const item = stack.pop();
+      if (Array.isArray(item)) stack.push(...item);
+      else if (item && typeof item === 'object') {
+        if (typeof item[key] === 'string' && item[key] !== scope?.user) return true;
+        stack.push(...Object.values(item));
+      }
+    }
+    return false;
+  };
+  const teammateContent = (tool, result) => ['ack', 'claim'].includes(tool) || (tool === 'check_overlap' && fromOther(result, 'owner_user')) || (TEAMMATE_RESULTS.has(tool) && fromOther(result, 'from_user'));
   let lastActivity = Date.now(), activeCalls = 0, idleTimer, activeTimer, demoted = false;
   const recordHostRequest = () => { lastActivity = Date.now(); };
   // A check that throws counts as not active (fail closed).
@@ -113,6 +187,7 @@ This channel stays bound to workspace ${settings.workspace}${settings.topic==nul
       const parsed = definition[2].safeParse(request.params.arguments ?? {});
       if (!parsed.success) throw new ChannelError('INVALID_ARGUMENTS', parsed.error.issues.map(i => `${i.path.join('.') || 'arguments'}: ${i.message}`).join('; '));
       const args = parsed.data;
+      guardOutbound(request.params.name, args);
       let result;
       switch (request.params.name) {
         case 'dead_letters': result=await channel.api('/queue/dead-letters?'+new URLSearchParams({topic:args.topic}));break;
@@ -180,6 +255,9 @@ This channel stays bound to workspace ${settings.workspace}${settings.topic==nul
           result = await channel.api('/decisions?' + query); break;
         }
       }
+      // D-10: written before the result is returned; a failed write returns
+      // SCOPE_WINDOW_UNAVAILABLE from the catch below instead of the bodies.
+      if (scope && teammateContent(request.params.name, result)) open();
       const encoded = JSON.stringify(result);
       const workspaceResult = ['dead_letters','requeue','claim','renew','done','queue_item','skip','keep','unkeep','pins','create_topic','topics','subscribe','leave_topic','close_topic','create_workspace', 'workspaces', 'members', 'leave', 'finish', 'remove_member', 'transfer_owner'].includes(request.params.name);
       const text = workspaceResult || ['register_workstream', 'check_overlap', 'record_decision', 'list_decisions'].includes(request.params.name)
@@ -198,6 +276,7 @@ This channel stays bound to workspace ${settings.workspace}${settings.topic==nul
     recordHostRequest();
     if (!active()) return;
     channel.start();
+    refreshMembers();
     if (isActive) { activeTimer = setInterval(active, ACTIVE_CHECK_MS); activeTimer.unref(); }
     if (settings.idleExitMs > 0) {
       idleTimer = setInterval(() => {

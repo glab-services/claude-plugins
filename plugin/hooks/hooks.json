@@ -9,11 +9,27 @@
         ]
       }
     ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/scope-hook.mjs", "--event", "pre", "--project-dir", "${CLAUDE_PROJECT_DIR}", "--data-dir", "${CLAUDE_PLUGIN_DATA}"], "timeout": 10 }
+        ]
+      }
+    ],
     "Stop": [
       {
         "hooks": [
           { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/stop-hook.mjs", "--project-dir", "${CLAUDE_PROJECT_DIR}", "--data-dir", "${CLAUDE_PLUGIN_DATA}"], "timeout": 15 },
-          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/watch.mjs", "--mode", "rewake", "--data-dir", "${CLAUDE_PLUGIN_DATA}", "--project-dir", "${CLAUDE_PROJECT_DIR}"], "asyncRewake": true, "timeout": 28800 }
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/watch.mjs", "--mode", "rewake", "--data-dir", "${CLAUDE_PLUGIN_DATA}", "--project-dir", "${CLAUDE_PROJECT_DIR}"], "asyncRewake": true, "timeout": 28800 },
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/scope-hook.mjs", "--event", "stop", "--project-dir", "${CLAUDE_PROJECT_DIR}", "--data-dir", "${CLAUDE_PLUGIN_DATA}"], "timeout": 10 }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node", "args": ["--use-system-ca", "${CLAUDE_PLUGIN_ROOT}/runtime/channel/scope-hook.mjs", "--event", "stop-failure", "--project-dir", "${CLAUDE_PROJECT_DIR}", "--data-dir", "${CLAUDE_PLUGIN_DATA}"], "timeout": 10 }
         ]
       }
     ]
