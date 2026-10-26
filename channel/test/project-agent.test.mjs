@@ -172,7 +172,7 @@ test('a second Claude session in the same project is inert: zero broker requests
   assert.deepEqual([start.stderr, stop.stdout, stop.stderr, watcher.code, watcher.stdout, watcher.stderr], ['', '', '', 0, '', '']);
   const m = await mcp(t, mcpEnv(s, f, 'other-2', project));
   assert.deepEqual(m.client.getServerCapabilities().tools, { listChanged: true });
-  assert.deepEqual(m.client.getServerVersion(), { name: 'team-messaging', version: '0.11.0' });
+  assert.deepEqual(m.client.getServerVersion(), { name: 'team-messaging', version: '0.11.1' });
   assert.deepEqual((await m.client.listTools()).tools, []);
   const refused = await m.client.callTool({ name: 'inbox', arguments: {} });
   assert.deepEqual([refused.isError, refused.structuredContent.error], [true, 'NOT_AGENT_SESSION']);
@@ -219,7 +219,7 @@ test('claim moves the agent; the old MCP refuses its next call and stops within 
   bindProject(project, { url: f.url, claudeSession: 'agent-1', session: 'sp' });
   const old = await mcp(t, mcpEnv(s, f, 'agent-1', project));
   assert.deepEqual(old.client.getServerCapabilities().tools, { listChanged: true });
-  assert.equal(old.client.getServerVersion().version, '0.11.0', 'the active server reports the release too');
+  assert.equal(old.client.getServerVersion().version, '0.11.1', 'the active server reports the release too');
   assert.ok((await old.client.listTools()).tools.length > 10);
   await eventually(() => requestsOf(f, 'sp').length > 0, 4000);
   const watcher = runChannel('watch.mjs', ['--mode', 'rewake', '--project-dir', project, '--data-dir', s.data, '--poll-s', '1', '--deadline-s', '30'], s.env(f), hookInput('Stop', 'agent-1'));
