@@ -5,6 +5,10 @@
   each self-contained change.
 - Messaging tools must not execute commands on another developer's machine or
   expose human-only resolve/reopen operations to agents.
+- Agents must never send information from outside the project root or about
+  the machine (OS, host, user, home, packages, processes, network, hardware,
+  environment, credentials). The plugin enforces this as a constant
+  (OUTBOUND_SCOPE, the team-message window); no option may weaken it.
 - Use the existing Conventional Commit style: `feat(scope): ...`,
   `fix(scope): ...`, `test(scope): ...`, or `docs(scope): ...`. Keep review
   findings in separate commits with relevant regression coverage.

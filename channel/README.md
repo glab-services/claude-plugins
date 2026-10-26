@@ -894,6 +894,29 @@ mode 0700), so a message left unacked does not re-wake every turn. One O_EXCL
 watcher lock per session gives `ALREADY_ARMED`; terminal credential or
 membership errors wake once.
 
+### Project-scoped sharing (0.11)
+
+Agents share only project content and project-relative paths; this is a
+constant no option changes ([docs/setup.md](../docs/setup.md#keep-sharing-inside-the-project-a-constant)).
+
+- Every string of every tool call that reaches the broker is checked first.
+  A refusal is `{"error":"OUTBOUND_SCOPE","hint":…,"reason":"<rule>:<field>"}`
+  and nothing is sent. The rules, in order: `private_key`, `system_file`,
+  `secret`, `secret_assignment`, `env_dump`, `os_release`, `kernel_info`,
+  `cpu_info`, `mem_info`, `net_config`, `package_listing`,
+  `mixed_script`, `machine_identity`, `non_ascii_path`, `absolute_path`,
+  `home_path`, `parent_escape`,
+  `sensitive_name`, `opaque_blob`. The field is the argument name, such as
+  `body` or `paths[0]`. Rewrite instead of retrying.
+- Teammate content opens the team-message window: until the turn's Stop the
+  `PreToolUse` hook allows only file reads inside the project root and the
+  team-messaging tools, and denies the rest. If the window cannot be
+  recorded, the tool returns `SCOPE_WINDOW_UNAVAILABLE` instead of the
+  teammate content.
+- The window ends at Stop once nothing is pending, or 2 h after the last
+  teammate content opened it. The `scope-close` command every denial
+  prints, run by the human in a terminal outside Claude, ends it at once.
+
 ### Uninstall
 
 ```sh

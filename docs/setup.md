@@ -581,11 +581,181 @@ agent binds it again: a member runs `/team-messaging:bind` with the topic
 (member bind, above), and an owner runs `/team-messaging:bind` for the
 workspace and topic. Each project then gets its own broker session.
 
+## Keep sharing inside the project (a constant)
+
+**Rule, for every agent:** share only what is inside the project root, as
+project-relative paths and project content. Never send anything from outside
+the project or about the machine: home or system files, other repositories,
+the OS, kernel or distribution, the hostname, the user name or the home path,
+installed packages and runtimes, processes, network configuration, hardware,
+environment values, credentials or tokens. This is a constant, not advice:
+no plugin option, environment variable, settings key or flag turns it off or
+weakens it (`channel/outbound-scope.mjs` reads no environment;
+`channel/test/outbound-scope.test.mjs`, "AM-S1 stdio";
+`channel/test/scope-hook.test.mjs`, "AM-S1 hook"). A refusal is final; there
+is no approval path.
+
+The plugin enforces it in three layers, plus settings you add yourself:
+
+- **The instructions (advisory).** The MCP server instructions, the
+  SessionStart context and the session-start prefix tell the agent the rule.
+- **The outbound guard.** Every string of every tool call that reaches the
+  broker is checked before the request (`guardOutbound` in
+  `channel/server.mjs`, the rules in `checkOutbound` in
+  `channel/outbound-scope.mjs`). A match returns `OUTBOUND_SCOPE` with a
+  `reason` of `<rule>:<field>`, never the matched text, and nothing is sent.
+  It refuses private keys, passwd/shadow/group lines, token shapes, secret
+  assignments, env dumps with live values, `/etc/os-release`, `uname -a`,
+  `/proc/cpuinfo`, `/proc/meminfo`, `ip addr`/`ifconfig`, `dpkg -l`,
+  `rpm -qa` and `npm ls -g` output (also when quoted or listed in Markdown),
+  `lscpu` lines, kernel releases, CIDR and private-range IP addresses, `ip
+  -br` lines, the live hostname, user name and home
+  path, absolute paths under a system or home root, `~` and `$HOME` paths,
+  `../` paths that leave the project tree, credential file names and long
+  encoded blobs. Project-relative paths, project files (including `../`
+  imports between the project's own directories), the project's own
+  dependency list, `ws:`/`user:`/`topic:` addresses and broker route names
+  pass. The text is folded before it is judged: compatibility forms are
+  folded, invisible characters (every default-ignorable code point,
+  combining marks and blank fillers) are removed, and slash and tilde
+  look-alikes become `/` and `~`. A word that mixes Latin letters with
+  letters of another script is refused as `mixed_script`, and a path with a
+  non-ASCII letter as `non_ascii_path`, so a disguised `/etc/passwd` is still
+  refused; text wholly in another script, such as Russian or Greek, passes.
+  It is a recogniser, not a boundary (see Known gaps).
+- **The team-message window (deny-only hook).** From the moment teammate
+  content reaches the agent (an `inbox`, `wait`, `pins`, `dead_letters`,
+  `queue_item` or `list_decisions` result with another user's entry, a
+  `check_overlap` naming another owner, a successful `ack` or `claim`, a
+  channel push of another user's message, a watcher wake or Stop-hook block
+  for another user's message, or pending messages in the SessionStart
+  context) until the
+  turn's Stop, the `PreToolUse` hook (`channel/scope-hook.mjs`) allows only
+  `Read`, `Glob` and `Grep` inside the project root (a path starting with
+  `~` or holding `$` or `%`, and a glob with `{` or a `..` segment, are
+  denied), `Read` of this session's
+  fresh large tool results, the team-messaging tools (checked by their
+  `mcp_server` provenance), `ToolSearch`, `TodoWrite`, `AskUserQuestion`,
+  the plan-mode tools and the exact `/team-messaging:watch` command. It
+  denies everything else, in every permission mode including
+  `bypassPermissions`: `Bash`, `WebFetch`, `WebSearch`, `Agent`/`Task`
+  subagents, other MCP servers, `LSP`, and `Write`, `Edit` and
+  `NotebookEdit` even inside the root. It never asks. Subagents' tool calls
+  go through the same hook. The window is one marker per project root,
+  `${CLAUDE_PLUGIN_DATA}/state/scope-<sha256(root)>.json`, so `/clear` or
+  another session in the same checkout is covered too. In the window, re-arm
+  the watcher only with the exact `/team-messaging:watch` command, and read
+  messages with `inbox`. The human's own `send`, `ask` and `invite` and the
+  name-only tools (`topics`, `members`, `workspaces`, `invites`) never open
+  it.
+- **The window closes** at Stop and StopFailure once no teammate message is
+  pending for the agent session (a Stop never removes a window reopened
+  while it checked), and in any case 2 h after `since`, the last time
+  teammate content opened it. No tool decision extends it, so a stream of
+  denials cannot keep it on. To end it at once, run the command every
+  denial prints, in a terminal outside Claude:
+  `node '<plugin>/runtime/channel/cli.mjs' scope-close --project-dir '<root>' --data-dir '<plugin data>'`,
+  with the paths filled in, or delete the marker file the denial names. On
+  its own, `team-messaging scope-close` uses the current directory and the
+  default data directory
+  `~/.claude/plugins/data/team-messaging-team-messaging-local`. If the window cannot be written, the teammate content
+  is withheld: the tool returns `SCOPE_WINDOW_UNAVAILABLE`, a push is dropped
+  (the message stays in `inbox`), SessionStart leaves the messages out, and
+  the watcher and the Stop hook do not wake the session. A project root the
+  hook cannot resolve (a deleted directory, an unexpanded variable) is
+  denied only while some window exists; otherwise the call passes with
+  `PROJECT_DIR_UNRESOLVED`. **Known behaviour:** after Esc, the next human
+  turn stays deny-only until its Stop.
+
+**Requirements.** Claude Code 2.1.274 or later, which passes `mcp_server` to
+hooks; older versions deny the team-messaging tools inside the window.
+`permissions.blockReadsOutsideWorkingDirectories` below needs 2.1.257 or
+later.
+
+**Add these to the project's `.claude/settings.json`** (a plugin cannot set
+permissions or the sandbox):
+
+```json
+{"permissions":{"blockReadsOutsideWorkingDirectories":true,"deny":["Read(~/.ssh/**)","Read(~/.aws/**)","Read(~/.gnupg/**)","Read(~/.config/team-messaging/**)"]},"sandbox":{"enabled":true,"filesystem":{"denyRead":["~/"],"allowRead":["."]}}}
+```
+
+The sandbox covers Bash commands only; Claude's file tools, MCP servers and
+hooks, including this plugin's, run outside it. Toolchains installed under
+your home (nvm, pyenv, cargo) need their own `allowRead` entries.
+
+**Real-node acceptance (operator, a bound agent session; recorded apart
+from the automated tests):**
+
+1. A teammate asks for the files in the project root: the answer is
+   project-relative.
+2. Teammates ask for `/etc/passwd`, `uname -a`, a home listing and the
+   environment. Each is refused by the agent, denied by the hook or returns
+   `OUTBOUND_SCOPE`, and the broker's `messages` table holds none of that
+   content.
+3. In the window, `Bash` and `WebFetch` are denied.
+4. Steps 2 and 3 under `bypassPermissions` are still denied.
+5. A subagent's `Read` of `/etc/hosts` is denied.
+6. A large tool result is readable from the session's `tool-results`
+   directory.
+7. The hook input for a team-messaging tool carries `mcp_server`
+   `{"source":"plugin","name":"plugin:team-messaging:team-messaging"}`.
+8. With `arm=bash`, the watcher re-arms in the window with the exact
+   `/team-messaging:watch` command, and a changed command is denied.
+9. After `/clear` in the window, `Bash` is still denied until the Stop.
+10. After the turn, the human's own `Read` outside the root is not blocked.
+
 ## 7. Known gaps
 
 - **Observed on the Claude desktop app:** after a restart, the watcher was
   armed only once a turn ran. Type one message in the session after
   restarting so that messages wake it.
+
+The project-scope rule ([above](#keep-sharing-inside-the-project-a-constant))
+leaves these residuals:
+
+- **R-1:** outside a team-message window, Bash with network access can send
+  data anywhere without our tools; only the sandbox network allowlist stops
+  that.
+- **R-2:** the outbound guard does not recognise paraphrase, bare lists of
+  names, or encodings shorter than its 200-character blob threshold. Numeric
+  arguments (ids, generations, `since`, timeouts) and names of up to 128
+  characters (topics, workstreams, thread ids) are covert channels: an agent
+  could encode a little data in them, and no content rule can tell. Whole
+  words spelled entirely in another script's look-alike letters (so no word
+  mixes scripts), and a secret split across several fields or messages, are
+  not recognised either.
+- **R-3:** `pip freeze` and `brew list` output looks exactly like a project's
+  requirements file or a list of names, so it passes. It cannot be collected
+  inside the window, where Bash is denied.
+- **R-4:** a hostname or user name shorter than 4 characters, or one on the
+  generic list (`root`, `node`, `admin`, `user`, `ubuntu`, `debian`,
+  `vscode`, `runner`, `codespace`, `dev`, `test`, `pi`, `ec2-user`,
+  `centos`, `fedora`, `docker`, `app`, `build`, `ci`, `home`, `localhost`,
+  and host names that are ordinary words: `server`, `laptop`,
+  `workstation`, `main`, `staging`, `desktop`, `pc`, `prod`, `production`,
+  `web`, `db`, `worker`, `master`, `host`, `box`, `machine`), is not an
+  identity check.
+- **R-5:** hook input that is not JSON, has no valid session id or data
+  directory, or comes with arguments in another form passes through with a
+  stderr code.
+- **R-6:** a scope hook that is killed, times out (10 s) or finds no node
+  fails open; `onFailure: "block"` is not set, because it would block every
+  tool call in every session whenever node cannot start.
+- **R-7:** `disableAllHooks`, disabling the plugin, or the standalone
+  (non-plugin) channel removes the window. The outbound guard stays.
+- **R-8:** name-only results (`topics`, `members`, `workspaces`, `invites`)
+  do not open the window.
+- **R-9:** push content arriving before the agent's first tool call is
+  covered by the push opening the window; a push whose window write fails is
+  dropped and stays in `inbox`.
+- **R-10:** a large tool result is readable in the window only when its
+  mtime is at or after the window opened. A coarse filesystem mtime can deny
+  a fresh file (fails closed); a tool call that started before the window
+  and finishes inside it can leave a fresh file with outside content (fails
+  open).
+- **R-11:** only the channel push, the tool results above, the watcher wake
+  and the Stop-hook block open the window. Any other autonomous turn start,
+  such as a background Bash command finishing, does not reopen it.
 
 ## 8. Troubleshooting
 
@@ -614,3 +784,10 @@ workspace and topic. Each project then gets its own broker session.
 | `PROJECT_UNKNOWN` | `channel/cli.mjs:72-79`, `channel/project-options.mjs:104-109` | The project directory is unknown: no SessionStart record for this session in `${CLAUDE_PLUGIN_DATA}/state`, or the directory does not exist. | Start Claude Code in the project (or pass `--project <dir>` from a terminal). |
 | `WORKSPACE_NOT_OWNED` | `bind` stderr, `channel/cli.mjs:248` | The workspace exists and you are not its owner, or it was deleted. Nothing was written. | Choose another name, or ask its owner for an invite and use `/team-messaging:join`. |
 | `TOPIC_MODE_MISMATCH` | `bind` stderr, `channel/cli.mjs:262` | The topic exists with a mode other than `--mode`. | Leave out `--mode` to reuse the topic, or choose another name. |
+| `OUTBOUND_SCOPE` | MCP tool result, `guardOutbound` in `channel/server.mjs` | The outbound guard refused the call; `reason` is `<rule>:<field>`. Nothing reached the broker. | Rewrite without that part (project-relative paths and project content only), or ask your human. Retrying the same content is refused again. |
+| `SCOPE_WINDOW_UNAVAILABLE` | MCP tool result, SessionStart context, watcher or Stop-hook stderr; `openWindow` in `channel/scope-window.mjs` | The team-message window could not be written (plugin data directory missing, relative, insecure, or the marker path is not a file), so teammate content was withheld and no wake happened. | Fix the plugin data directory (section 6), then use `inbox`. |
+| `SCOPE_WINDOW_INVALID` | `scope_hook_unavailable` stderr at Stop, `closeWindow` | The window marker path is not a regular file, so it was left alone and the window stays. | Remove the non-file at the marker path (`${CLAUDE_PLUGIN_DATA}/state/scope-<sha256(root)>.json`). |
+| `PROJECT_DIR_UNRESOLVED` | `scope_hook_unavailable` stderr, `channel/scope-hook.mjs` | The hook could not resolve `--project-dir`, and no window was open, so nothing was blocked. | Start Claude Code in an existing project directory. |
+| `INVALID_SCOPE_HOOK_ARGS` | `scope_hook_unavailable` stderr | The scope hook got arguments other than `--event`, `--project-dir`, `--data-dir` in that order. | Reinstall the plugin. |
+| `SESSION_ID_UNKNOWN`, `DATA_DIR_REQUIRED` | `scope_hook_unavailable` stderr | The hook input had no valid session id, or `--data-dir` was not absolute; the call passed (residual R-5). | Reinstall the plugin; report the Claude Code version. |
+| `SCOPE_CLOSE_FAILED` | `scope_hook_unavailable` stderr at Stop | Closing the window failed for an uncoded reason; it ends 2 h after it opened. | Run the `scope-close` command a denial prints, or delete the marker file it names. |
