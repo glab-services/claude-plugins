@@ -221,13 +221,13 @@ export function projectOptions(token, { root, url, claudeSession, binding }) {
 // directory checks. P-11: SessionStart records each Claude session's project
 // directory, so the CLI and the Bash watcher find the project without a path
 // in a shell command (U-6). AM-7: the adopt marker.
-function writeRecord(dataDir, name, value, { home } = {}) {
+export function writeRecord(dataDir, name, value, { home } = {}) {
   const dir = stateDir(dataDir, { home }), path = join(dir, name), tmp = `${path}.${randomBytes(8).toString('hex')}.tmp`;
   const fd = openSync(tmp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   try { writeFileSync(fd, JSON.stringify(value)); fsyncSync(fd); } finally { closeSync(fd); }
   try { renameSync(tmp, path); } catch (error) { try { unlinkSync(tmp); } catch {} throw error; }
 }
-function readRecord(dataDir, name, { home } = {}) {
+export function readRecord(dataDir, name, { home } = {}) {
   const dir = stateDir(dataDir, { home });
   let fd;
   try { fd = openSync(join(dir, name), constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK); }

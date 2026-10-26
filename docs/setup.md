@@ -486,17 +486,47 @@ rewrites only `claude_session_id` and the MAC, makes no broker call, and keeps
 the broker session, so the inbox, cursors, leases and queue claims carry over
 (`channel/cli.mjs:321-338`). The previous agent's MCP server refuses its next
 call and stops polling within about 5 s; its watcher exits at its next poll.
+SessionStart also runs for forked sessions (matcher
+`startup|resume|clear|compact|fork` since 0.11.1), so a fork gets its session
+record and the claim skill finds the project without `--project`. In a
+session that is not the agent, SessionStart shows the user a notice (a
+`systemMessage`) that names the agent session and `/team-messaging:claim`,
+and tells the model the same; the inert MCP server's instructions say it
+too. The notice shows at every SessionStart of a non-agent session, a
+deliberate second session included, because a fork cannot be told apart
+from one.
 
-**Reconnect, `/clear` and `--resume`.** The MCP server decides once, at
-start, whether it is active: promotion never happens in place. After a bind,
-join or claim, reconnect the team-messaging MCP server (`/mcp`, then
-team-messaging, then Reconnect), or restart with `claude --continue` or
-`--resume`. How the session id behaves across `/compact`, `/clear`,
-`--continue`, `--resume` and a reconnect is **UNVERIFIED** (it needs a
-logged-in session, plan Phase 0.4). The design fails safe either way: a
-mismatch only ever makes a process inert. If the hooks go quiet after
-`/clear`, run `/team-messaging:claim` and then reconnect; if that does not
-help, restart with `claude --resume`.
+**Reconnect, `/clear`, `--resume` and forks.** Observed in acceptance on
+2026-10-26 (Claude desktop app, CLI 2.1.308): `/compact` keeps the session
+id; `/clear` and edit-and-retry gave a new session id (observed); that
+edit-and-retry sends `source:fork` is **UNVERIFIED** (acceptance A1). A
+`--resume … --fork-session` is a fork by the hooks documentation. A new id
+makes the session inert, and SessionStart says so (see Claim).
+
+Since 0.11.1 the inert MCP server re-checks its binding every 2 s. The first
+time this session is the agent (after a claim, bind or join here), it serves
+the tools on the same connection and sends `tools/list_changed`, so the tools
+appear without a reconnect. Claude Code documents that re-fetch for the
+interactive terminal, `-p` and the Agent SDK; for the desktop app it is
+**UNVERIFIED** until acceptance A3. The conditions are those of a restart:
+the same project-file checks, the MAC verified with the token read only
+after the session id matches. A reconnect (`/mcp`, then team-messaging, then
+Reconnect) or a restart with `claude --continue` is still needed:
+- after `/clear`, because the MCP server keeps the id it started with and can
+  never become the new id's agent;
+- after a first credential save, because the server's `TM_*` environment is
+  fixed when it starts;
+- when the tools do not appear within a few seconds.
+
+Promotion needs no human step, so a claim, bind or join that the model runs
+through Bash now takes effect within about 2 s: the Bash permission prompt
+is the only gate, as the claim skill warns. Bash is denied inside the
+team-message window, so a teammate message cannot trigger it, and it only
+chooses which local session in this project is the agent. After a claim the
+previous agent stops at its next 5 s check (up to about 9 s when it reads the
+project file mid-write); until then the old and the new agent are both active
+on one broker session, as with a fast reconnect. Demotion stays final: a
+promoted, then demoted process needs a reconnect.
 
 **Threats, in short.** A cloned repository is untrusted input: its files,
 including a force-added `settings.local.json`, its `settings.json` env block,
@@ -666,6 +696,19 @@ The plugin enforces it in three layers, plus settings you add yourself:
   denied only while some window exists; otherwise the call passes with
   `PROJECT_DIR_UNRESOLVED`. **Known behaviour:** after Esc, the next human
   turn stays deny-only until its Stop.
+- **Only while the tools are loaded (0.11.1).** The Stop hook, the watcher
+  and SessionStart wake the session, list pending messages or open the
+  window only while this session's MCP server serves: it has answered a
+  non-empty `tools/list` and its process is alive (a private record
+  `${CLAUDE_PLUGIN_DATA}/state/<session>.serving`, checked by `serving` in
+  `channel/agent-live.mjs`). Otherwise the Stop hook neither blocks nor opens
+  the window and shows the user `TOOLS_NOT_LOADED`, the watcher keeps polling
+  without waking, and SessionStart leaves the messages out with a
+  `TOOLS_NOT_LOADED` line. In push mode the server holds teammate pushes
+  until the host has listed its tools (the messages stay in `inbox`), then
+  pushes them. This
+  only removes wakes: content still leaves the server only after the window
+  is written.
 
 **Requirements.** Claude Code 2.1.274 or later, which passes `mcp_server` to
 hooks; older versions deny the team-messaging tools inside the window.
@@ -703,6 +746,9 @@ from the automated tests):**
    `/team-messaging:watch` command, and a changed command is denied.
 9. After `/clear` in the window, `Bash` is still denied until the Stop.
 10. After the turn, the human's own `Read` outside the root is not blocked.
+11. **UNVERIFIED (0.11.1, review r1 R6):** in a real non-agent session, the
+    inert server's `experimental['claude/channel']` capability causes no
+    channel registration and no warning in Claude Code.
 
 ## 7. Known gaps
 
@@ -756,6 +802,28 @@ leaves these residuals:
 - **R-11:** only the channel push, the tool results above, the watcher wake
   and the Stop-hook block open the window. Any other autonomous turn start,
   such as a background Bash command finishing, does not reopen it.
+- **R-12:** an MCP server that dies after a hook judged it serving, and
+  before the model calls a tool, leaves an open window: Bash stays denied
+  until the Stop, and for the following turns while messages are pending.
+  The way out is the same as for any window: the `scope-close` command a
+  denial prints, or the 2 h limit. While two processes of one session
+  overlap (a reconnect), an old process killed with SIGKILL can leave
+  serving false for up to 5 s, until the live server's next check rewrites
+  the record; wakes are dropped in that time, never content. `clearServing`
+  reads the record and then unlinks it, so a record rewritten between the
+  two can be removed; that also fails safe, suppressing wakes for up to 5 s.
+- **R-13:** without `/proc` (macOS) the serving check is pid-only, so a
+  reused pid can read as serving. That brings back a wake for a session
+  without tools (the trap R-12 describes), but no content leaks. The SIGKILL
+  overlap in R-12 applies here too.
+- **R-14:** in push mode, teammate pushes wait until the host has listed the
+  tools. Until then a message is only in `inbox`; at the first listing the
+  server pushes each held message that is still unacked, opening the window
+  first as for any push.
+- **R-15:** the window is one marker per project root, so a window opened by
+  an earlier agent session also makes a forked or cleared session in the
+  same root strict, and its Bash `claim` is denied until the Stop. Run the
+  `scope-close` command first.
 
 ## 8. Troubleshooting
 
@@ -779,9 +847,10 @@ leaves these residuals:
 | `TOKEN_FILE_MISMATCH` | `channel/credentials.mjs:12-25` | The saved token file is not the path `join` saved for the saved broker URL, for example a hand-named file (S-1). Nothing was read or sent. | Rejoin, or move the file to the `credential_path` path. |
 | `INVALID_HOOK_ARGS` | `channel/plugin-env.mjs:82-90` | A hook got arguments other than `--project-dir` and `--data-dir`. | Reinstall the plugin. |
 | `SESSION_ID_UNKNOWN` | `channel/plugin-env.mjs:110`, `channel/cli.mjs:72-79` | No valid Claude session id: the MCP server's `CLAUDE_CODE_SESSION_ID` is absent or malformed (the server stays inert), or a CLI call lacks `--claude-session`. | Use the skills, which pass `${CLAUDE_SESSION_ID}`. |
-| `NOT_AGENT_SESSION` | MCP tool result, `channel/plugin-main.mjs`, `channel/server.mjs:61-110` | This session is not the project's agent session, it stopped being it after a claim, or the project's binding was refused. | Use the agent session, or run `/team-messaging:claim` here and reconnect. |
-| `PROJECT_NOT_BOUND` | MCP tool result, Bash watcher, `claim` | The project has no team-messaging binding (idle). | Run `/team-messaging:bind` or `/team-messaging:join` in the session that should be the agent, then reconnect. |
-| `PROJECT_UNKNOWN` | `channel/cli.mjs:72-79`, `channel/project-options.mjs:104-109` | The project directory is unknown: no SessionStart record for this session in `${CLAUDE_PLUGIN_DATA}/state`, or the directory does not exist. | Start Claude Code in the project (or pass `--project <dir>` from a terminal). |
+| `NOT_AGENT_SESSION` | MCP tool result, `channel/plugin-main.mjs`, `channel/server.mjs:61-110` | This session is not the project's agent session, it stopped being it after a claim, or the project's binding was refused. | Use the agent session, or run `/team-messaging:claim` here; the tools load within a few seconds, reconnect if they do not. A reconnect is always needed after `/clear` (the MCP server keeps its old id) or once this process was demoted (demotion stays final). |
+| `PROJECT_NOT_BOUND` | MCP tool result, Bash watcher, `claim` | The project has no team-messaging binding (idle). | Run `/team-messaging:bind` or `/team-messaging:join` in the session that should be the agent; the tools load within a few seconds, reconnect if they do not (restart after a first credential save). |
+| `PROJECT_UNKNOWN` | `channel/cli.mjs:72-79`, `channel/project-options.mjs:104-109` | The project directory is unknown: no SessionStart record for this session in `${CLAUDE_PLUGIN_DATA}/state`, or the directory does not exist. A session forked under 0.11.0 or earlier has no record, because SessionStart did not run for forks. | Start Claude Code in the project, or restart the session (or pass `--project <dir>` from a terminal). |
+| `TOOLS_NOT_LOADED` | Stop hook `systemMessage`, SessionStart context; `serving` in `channel/agent-live.mjs` | Team messages are pending, but this session's team-messaging MCP server has not listed its tools (right after a claim, bind or join, or a server that did not start), so the session was not woken and no window opened. | Wait a few seconds for the tools to load; if they do not appear, reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect). |
 | `WORKSPACE_NOT_OWNED` | `bind` stderr, `channel/cli.mjs:248` | The workspace exists and you are not its owner, or it was deleted. Nothing was written. | Choose another name, or ask its owner for an invite and use `/team-messaging:join`. |
 | `TOPIC_MODE_MISMATCH` | `bind` stderr, `channel/cli.mjs:262` | The topic exists with a mode other than `--mode`. | Leave out `--mode` to reuse the topic, or choose another name. |
 | `OUTBOUND_SCOPE` | MCP tool result, `guardOutbound` in `channel/server.mjs` | The outbound guard refused the call; `reason` is `<rule>:<field>`. Nothing reached the broker. | Rewrite without that part (project-relative paths and project content only), or ask your human. Retrying the same content is refused again. |

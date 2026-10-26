@@ -837,8 +837,12 @@ The global plugin options hold only the credential (`broker_url`,
 both, keyed by the credential. Only the agent session is active. In an idle
 project (no binding) or in any other session, the MCP server still starts but
 lists no tools, answers every call with `PROJECT_NOT_BOUND` (idle) or
-`NOT_AGENT_SESSION`, reads no token and never contacts the broker; the hooks
-are silent apart from one SessionStart line. There is no
+`NOT_AGENT_SESSION`, reads no token and never contacts the broker until it
+becomes the agent (below); the hooks are silent apart from SessionStart.
+Since 0.11.1 that server's instructions name its state and how to claim,
+followed by the messaging rules, and in a non-agent session SessionStart
+shows the user a notice (`systemMessage`) naming the agent session and
+`/team-messaging:claim`. There is no
 `PLUGIN_NOT_CONFIGURED` exit any more, so `claude mcp list` shows the server
 connected in every project. The model, the file shape, the trust checks and
 every error code are in [docs/setup.md](../docs/setup.md#one-agent-session-per-project).
@@ -853,7 +857,8 @@ and the CLI finds the project through the record SessionStart writes.
   `/team-messaging:join`. It redeems the invite (after checking the project
   and the saved credential, so a conflict never burns the invite), stores a
   mode-0600 credential, saves its URL and path globally if none is saved, and
-  writes the project file. Delete the file and reconnect the MCP server.
+  writes the project file. Delete the file; the tools load within a few
+  seconds (a first credential save needs a restart).
 - Owner: `/team-messaging:bind` runs
   `team-messaging bind <url> --name <name> --workspace <ws> [--topic <t> [--mode broadcast|queue]]`.
   It reuses the saved credential (`CREDENTIAL_MISSING` if there is none),
@@ -864,6 +869,11 @@ and the CLI finds the project through the record SessionStart writes.
 - `/team-messaging:claim` (user-only skill) moves the agent role to the
   current session and keeps the broker session. `bind --adopt-global` moves a
   0.9 global binding into one project.
+- Since 0.11.1 the session's inert MCP server re-checks its binding every 2 s
+  and, once the session is the agent, serves the tools in place and sends
+  `tools/list_changed`, so no reconnect is needed. Reconnect the MCP server
+  (`/mcp`, then team-messaging, then Reconnect) if the tools do not appear,
+  after `/clear`, or after a first credential save.
 - `adapters[0].status` is `registered`, `skipped` (already bound the same
   way), `conflict`, `failed` or `manual`; `legacy_registration` flags an older
   user-scope `claude mcp` entry for the same binding.
@@ -872,7 +882,7 @@ and the CLI finds the project through the record SessionStart writes.
 
 ### Arm modes
 
-- `arm=rewake` (default): every SessionStart (`startup|resume|clear|compact`)
+- `arm=rewake` (default): every SessionStart (`startup|resume|clear|compact|fork`)
   and every Stop starts `watch.mjs --mode rewake` as an `asyncRewake` hook
   (timeout 28800 s, watcher deadline 28500 s). It exits 2 with one
   `team-message id=… thread=… from=… kind=…` line per new message, which wakes
@@ -882,6 +892,10 @@ and the CLI finds the project through the record SessionStart writes.
   per-session watcher lock keeps one watcher: a later Stop watcher exits 0
   silently while the SessionStart one is live. The synchronous Stop hook blocks
   once (never when `stop_hook_active`) while unreported messages are pending.
+  Since 0.11.1 the Stop hook, the watcher and SessionStart wake or list
+  messages only while this session's MCP server has listed its tools;
+  otherwise they report `TOOLS_NOT_LOADED` (Stop and SessionStart) or keep
+  polling (watcher).
 - `arm=bash`: `/team-messaging:watch` starts the same watcher in a background
   Bash command; it exits 0 with the lines, `WATCH_TIMEOUT re-arm`,
   `ALREADY_ARMED`, `WATCH_ENDED <code>` (exit 4) or exit 5 when unconfigured.
@@ -913,6 +927,8 @@ constant no option changes ([docs/setup.md](../docs/setup.md#keep-sharing-inside
   team-messaging tools, and denies the rest. If the window cannot be
   recorded, the tool returns `SCOPE_WINDOW_UNAVAILABLE` instead of the
   teammate content.
+- Since 0.11.1 no hook opens the window, and no teammate push is delivered,
+  while this session's MCP server has not listed its tools.
 - The window ends at Stop once nothing is pending, or 2 h after the last
   teammate content opened it. The `scope-close` command every denial
   prints, run by the human in a terminal outside Claude, ends it at once.

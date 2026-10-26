@@ -2,7 +2,10 @@ import { topicHeartbeat } from '../../test-support/topic-fixture.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { brokerFixture, tokens, pluginScratch, runChannel, umaskPluginData } from './helpers.mjs';
+import { createHash } from 'node:crypto';
+import { existsSync, realpathSync } from 'node:fs';
+import { join } from 'node:path';
+import { brokerFixture, tokens, pluginScratch, runChannel, umaskPluginData, markServing } from './helpers.mjs';
 import { reported, stateDir } from '../watch-state.mjs';
 
 const input = key => JSON.stringify({ hook_event_name: 'SessionStart', session_id: key, source: 'startup' });
@@ -34,6 +37,7 @@ test('the messages selected into context are listed but none is marked reported'
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
   topicHeartbeat(f.broker, 'alice', 'a');
   const big = f.broker.send('alice', 'a', { to: 'user:bob', body: 'x'.repeat(2000) }), small = f.broker.send('alice', 'a', { to: 'user:bob', body: 'small' });
+  markServing(s, 'sel', s.project(f, 'sel'));
   const result = await start(s, f, 'sel', { HOOK_CONTEXT_MAX_CHARS: '1024' }).result;
   assert.equal(result.code, 0, result.stderr);
   const text = context(result);
@@ -118,6 +122,7 @@ for (const order of ['context first', 'watcher first', 'concurrently'])
     const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
     topicHeartbeat(f.broker, 'alice', 'a');
     const sent = f.broker.send('alice', 'a', { to: 'user:bob', body: 'pending at startup' }), key = `order-${order.split(' ')[0]}`;
+    markServing(s, key, s.project(f, key));
     let ctx, woke;
     if (order === 'context first') { ctx = await start(s, f, key).result; woke = await watcher(s, f, key).result; }
     else if (order === 'watcher first') { woke = await watcher(s, f, key).result; ctx = await start(s, f, key).result; }
@@ -129,6 +134,44 @@ for (const order of ['context first', 'watcher first', 'concurrently'])
     assert.deepEqual(reported(stateDir(s.data, { home: s.home }), key), [sent.id], 'only the watcher claimed it');
     assert.equal(f.store.get('SELECT acked_at FROM messages WHERE id=?', sent.id).acked_at, null);
   });
+
+// 0.11.1 F5 (D5, findings R-a): at startup or resume the MCP server may not
+// have listed its tools yet, or may have failed to start. Listing messages
+// then opened the strict window for a session that may have no tools. The
+// SessionStart watcher wakes once the server serves.
+test('F5: SessionStart leaves pending messages out and opens no window until this session\'s MCP server serves', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t), project = s.project(f, 'unserved');
+  const window = join(s.data, 'state', `scope-${createHash('sha256').update(realpathSync(project)).digest('hex')}.json`);
+  topicHeartbeat(f.broker, 'alice', 'a');
+  const sent = f.broker.send('alice', 'a', { to: 'user:bob', body: 'pending before tools' });
+  const before = await start(s, f, 'unserved').result;
+  assert.equal(before.code, 0, before.stderr);
+  assert.ok(context(before).startsWith("team-messaging: TOOLS_NOT_LOADED: team messages are pending but not shown, because this session's team-messaging tools are not loaded yet. Once they load, call inbox; if they do not appear, ask the user to reconnect the team-messaging MCP server.\n\n"), context(before));
+  assert.ok(!context(before).includes(sent.thread_id), 'the message is left out');
+  assert.equal(JSON.parse(before.stdout).systemMessage, undefined, 'context only: a startup race is normal');
+  assert.equal(existsSync(window), false, 'no window');
+  markServing(s, 'unserved', project);
+  const after = await start(s, f, 'unserved').result;
+  assert.ok(context(after).includes(sent.thread_id), 'positive control: a serving session lists it');
+  assert.equal(existsSync(window), true, 'and opens the window');
+});
+
+// 0.11.1 F1 (D2): a fork or /clear gives the session a new id, so it is no
+// longer the agent. additionalContext reaches only the model, which went
+// silent in acceptance; systemMessage is shown to the human.
+test('F1: a forked or cleared session in a bound project tells the user, and the model, that it is not the agent and how to claim', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
+  for (const source of ['fork', 'clear']) {
+    const key = `after-${source}`;
+    const result = await runChannel('plugin-session-start.mjs', s.hook(f, 'the-agent'), s.env(f), JSON.stringify({ hook_event_name: 'SessionStart', session_id: key, source })).result;
+    assert.equal(result.code, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.match(output.systemMessage ?? '', /run \/team-messaging:claim here/, source);
+    assert.ok(output.systemMessage.includes('the-agent'), source);
+    assert.ok(output.hookSpecificOutput.additionalContext.includes('A fork or /clear'), source);
+  }
+  assert.deepEqual(f.requests, [], 'zero broker requests');
+});
 
 // J-7, closed by plan project-options AM-1. This test used to record that an
 // exported TM_TOPIC reached the hook when the topic option variable was

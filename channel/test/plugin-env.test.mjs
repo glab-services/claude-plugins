@@ -197,5 +197,5 @@ test('the reported server version is the plugin release', async () => {
   const json = path => JSON.parse(readFileSync(new URL(path, import.meta.url), 'utf8'));
   const lock = json('../../plugin/package-lock.json');
   assert.deepEqual([json('../../plugin/.claude-plugin/plugin.json').version, json('../../plugin/package.json').version, lock.version, lock.packages[''].version], [VERSION, VERSION, VERSION, VERSION]);
-  assert.equal(VERSION, '0.11.0');
+  assert.equal(VERSION, '0.11.1');
 });

@@ -15,7 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { bindProject, brokerFixture, eventually, pluginScratch, runChannel, session, writeProjectFile } from './helpers.mjs';
+import { bindProject, brokerFixture, eventually, markServing, pluginScratch, runChannel, session, writeProjectFile } from './helpers.mjs';
 
 const OFFLINE = { url: 'http://127.0.0.1:9' };
 // Review r1 C1: every denial names the way out (checked in decision()).
@@ -314,11 +314,13 @@ test('SessionStart with pending messages opens the window and adds the scope lin
   assert.equal(existsSync(markerPath(s, s.project(OFFLINE, 'ss-offline'))), false, 'a fetch failure opens nothing');
   topicHeartbeat(f.broker, 'alice', 'a');
   f.broker.send('alice', 'a', { to: 'user:bob', body: 'pending at startup' });
+  markServing(s, 'ss-pending', s.project(f, 'ss-pending', { session: 'pending-b' }));
   const pending = await run(f, 'ss-pending', { session: 'pending-b' });
   assert.match(context(pending), /pending at startup/); assert.ok(context(pending).includes(SCOPE_LINE));
   assert.equal(marker(s, s.project(f, 'ss-pending', { session: 'pending-b' })).claude_session_id, 'ss-pending', 'pending messages open the window');
   // FA-5: a window that cannot be written withholds the messages.
   mkdirSync(markerPath(s, s.project(f, 'ss-broken', { session: 'broken-b' })));
+  markServing(s, 'ss-broken', s.project(f, 'ss-broken', { session: 'broken-b' }));
   const broken = await run(f, 'ss-broken', { session: 'broken-b' });
   assert.equal(broken.code, 0);
   assert.doesNotMatch(context(broken), /pending at startup/);
@@ -345,6 +347,8 @@ test('the largest SessionStart context stays 500 characters under the host limit
 test('push mode: the marker exists when the notification arrives; a push from our own user opens nothing; a broken marker path drops the push (FA-4)', async t => {
   const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
   const a = await agent(t, f, s, 'push-a', { binding: { topic: 'fixture', session: 'push-b' }, env: { TM_MODE: 'push' } });
+  // 0.11.1 D13: the host lists the tools right after connect; teammate pushes wait for that.
+  await a.client.listTools();
   await eventually(() => f.broker.streams.has('push-b'), 4000);
   // Our own user: another of bob's sessions sends to user:bob.
   const own = await session(f, 'bob', 'bob-other');
@@ -364,6 +368,46 @@ test('push mode: the marker exists when the notification arrives; a push from ou
   rmSync(markerPath(s, a.project), { recursive: true });
   const inbox = await a.call('inbox');
   assert.ok(inbox.structuredContent.messages.some(message => message.id === dropped.id), 'the message stays in the inbox');
+});
+
+// 0.11.1 D13 (round 1, A2): a server promoted in place has the claude/channel
+// capability, and the host may not have listed its tools yet. A teammate push
+// then would open the strict window for a session without tools, the F5 trap.
+// Until the first tools/list the push is dropped and the message stays
+// buffered and unacked. inbox is read only at the end, through callTool,
+// which does not list the tools.
+test('F5: in push mode a teammate push before the host lists the tools delivers nothing and writes no marker; after listing, the next push delivers', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
+  const a = await agent(t, f, s, 'push-gate', { binding: { topic: 'fixture', session: 'gate-b' }, env: { TM_MODE: 'push' } });
+  await eventually(() => f.broker.streams.has('gate-b'), 4000);
+  topicHeartbeat(f.broker, 'alice', 'a');
+  const early = f.broker.send('alice', 'a', { to: 'user:bob', body: 'pushed before listing' });
+  await new Promise(resolve => setTimeout(resolve, 2000));
+  assert.equal(a.notifications.some(n => n.content.includes('pushed before listing')), false, 'no notification before the tools are listed');
+  assert.equal(existsSync(markerPath(s, a.project)), false, 'no marker');
+  await a.client.listTools();
+  const late = f.broker.send('alice', 'a', { to: 'user:bob', body: 'pushed after listing' });
+  await eventually(() => a.notifications.some(n => n.content.includes('pushed after listing')), 4000);
+  assert.equal(a.notifications.find(n => n.content.includes('pushed after listing')).markerSeen, true, 'the marker was written before the push');
+  const ids = (await a.call('inbox')).structuredContent.messages.map(message => message.id);
+  assert.ok(ids.includes(early.id) && ids.includes(late.id), JSON.stringify(ids));
+});
+
+// Review r1 R1: a push dropped by the gate was never retried, so with arm=off
+// (no watcher) a message that arrived before tools/list reached the session
+// only through a later inbox call. The first listing re-pushes it, window first.
+test('R1: in push mode with arm=off, a teammate message that arrived before tools/list is pushed right after the host lists', async t => {
+  const f = await brokerFixture(t, { defaultOwner: 'bob' }), s = pluginScratch(t);
+  const a = await agent(t, f, s, 'push-retry', { binding: { topic: 'fixture', session: 'retry-b' }, env: { TM_MODE: 'push', TM_ARM: 'off' } });
+  await eventually(() => f.broker.streams.has('retry-b'), 4000);
+  topicHeartbeat(f.broker, 'alice', 'a');
+  f.broker.send('alice', 'a', { to: 'user:bob', body: 'held before listing' });
+  await new Promise(resolve => setTimeout(resolve, 1000));
+  assert.equal(a.notifications.some(n => n.content.includes('held before listing')), false, 'positive control: held back before listing');
+  await a.client.listTools();
+  await eventually(() => a.notifications.some(n => n.content.includes('held before listing')), 4000);
+  assert.equal(a.notifications.filter(n => n.content.includes('held before listing')).length, 1, 'pushed once');
+  assert.equal(a.notifications.find(n => n.content.includes('held before listing')).markerSeen, true, 'the window opened before the push');
 });
 
 test('AM-S1 hook: HOOK_INPUT_MAX_BYTES and the CLAUDE_PLUGIN_OPTION_* keys change no decision', async t => {
@@ -604,6 +648,7 @@ test('S5: the rewake watcher and the Stop hook open the window before waking, an
   const hookInput = key => JSON.stringify({ hook_event_name: 'Stop', session_id: key, stop_hook_active: false });
   const watcher = key => runChannel('watch.mjs', ['--mode', 'rewake', '--project-dir', s.project(f, key), '--data-dir', s.data, '--poll-s', '1', '--deadline-s', '5'], s.env(f), hookInput(key)).result;
   const stopHook = key => runChannel('stop-hook.mjs', ['--project-dir', s.project(f, key), '--data-dir', s.data], s.env(f), hookInput(key)).result;
+  for (const key of ['wake-ok', 'block-ok', 'wake-broken', 'block-broken']) markServing(s, key, s.project(f, key));
   const woke = await watcher('wake-ok');
   assert.equal(woke.code, 2, woke.stderr);
   assert.equal(marker(s, s.project(f, 'wake-ok')).claude_session_id, 'wake-ok', 'the rewake opened the window');
@@ -688,6 +733,7 @@ test('CC9: a wake or Stop block for only our own user\'s message opens no window
   const own = await session(f, 'bob', 'bob-own');
   assert.equal((await own.call('send', { to: 'user:bob', body: 'own note' })).isError, undefined);
   const hookInput = key => JSON.stringify({ hook_event_name: 'Stop', session_id: key, stop_hook_active: false });
+  for (const key of ['own-wake', 'own-block']) markServing(s, key, s.project(f, key));
   const woke = await runChannel('watch.mjs', ['--mode', 'rewake', '--project-dir', s.project(f, 'own-wake'), '--data-dir', s.data, '--poll-s', '1', '--deadline-s', '5'], s.env(f), hookInput('own-wake')).result;
   assert.equal(woke.code, 2, woke.stderr);
   assert.equal(existsSync(markerPath(s, s.project(f, 'own-wake'))), false, 'the watcher opened no window');

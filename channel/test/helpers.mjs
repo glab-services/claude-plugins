@@ -15,6 +15,7 @@ import { config } from '../../broker/config.mjs';
 import { createServer } from '../../broker/server.mjs';
 import { credentialPath } from '../credentials.mjs';
 import { writeSessionRecord } from '../project-options.mjs';
+import { markServing as markServingRecord } from '../agent-live.mjs';
 
 export const tokens = { alice: 'alice-test-token-0000000000000000', bob: 'bob-test-token-000000000000000000' };
 export async function brokerFixture(t, { streamStatus, ...overrides } = {}) {
@@ -148,6 +149,11 @@ export function pluginScratch(t, { token = tokens.bob } = {}) {
   s.bash = (fixture, key, binding) => { writeSessionRecord(data, key, s.project(fixture, key, binding), { home }); return ['--claude-session', key]; };
   return s;
 }
+// 0.11.1 D10: the hooks wake, block or list messages only while this
+// session's MCP server serves its tools (agent-live.mjs, F5). Tests that run a
+// hook with no MCP server stand in for a serving one: the record names this
+// test process, which is alive, for `session` and the project root `project`.
+export function markServing(s, session, project) { markServingRecord(s.data, session, project, { home: s.home }); }
 // Recreates what Claude Code leaves under umask 002: ~/.claude/plugins,
 // plugins/data and the plugin data dir at `mode`, below `claude` (the
 // ~/.claude mode) and the scratch HOME at `home`. Needs no extra group, so it

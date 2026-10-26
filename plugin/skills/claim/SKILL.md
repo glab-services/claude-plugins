@@ -15,6 +15,6 @@ Only the user can start this skill: `disable-model-invocation` keeps the model f
    ```
 
 2. Read the JSON result:
-   - `claimed`: report the workspace, topic and project root, then tell the user to reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect) or restart with `claude --continue`. The broker session is kept, so the inbox, cursors, leases and queue claims carry over. The previous agent session stops within about 5 s.
+   - `claimed`: report the workspace, topic and project root, then relay the hint: the tools appear within a few seconds; if they do not, reconnect the team-messaging MCP server (`/mcp`, then team-messaging, then Reconnect) or restart with `claude --continue`, and after `/clear` a reconnect is always needed. The broker session is kept, so the inbox, cursors, leases and queue claims carry over. The previous agent session stops within about 5 s.
    - `already_agent`: this session already is the agent; nothing changed.
 3. An error comes back as `{error, hint}` on stderr; show the hint. `PROJECT_OPTIONS_UNTRUSTED` means the project file was not written for this checkout by this user (copied, committed or edited), so it cannot be claimed; `PROJECT_NOT_BOUND` means there is nothing to claim.

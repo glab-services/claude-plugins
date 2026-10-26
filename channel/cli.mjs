@@ -123,7 +123,7 @@ async function bindProjectFile({ url, path, token, binding, claudeSession, proje
   writeProjectOptions(root, projectOptions(token, { root, url, claudeSession, binding }));
   return { ...adapter, status: 'registered', project_root: root, session_id: binding.session_id,
     hint: adapter.status === 'registered' ? 'The plugin credential was saved and this project is bound to this Claude session; restart Claude Code with claude --continue to load them.'
-      : 'This project is bound to this Claude session; reconnect the team-messaging MCP server (/mcp, then Reconnect) to load its tools.' };
+      : 'This project is bound to this Claude session; the team-messaging tools load within a few seconds. If they do not appear, reconnect the team-messaging MCP server (/mcp, then Reconnect).' };
 }
 async function recover(fetcher, url, token, timeoutMs) {
   try { await request(fetcher, url, '/credentials/revoke', {}, token, timeoutMs); return true; }
@@ -335,7 +335,7 @@ export async function claim(options, deps = {}) {
   if (found.options.claude_session_id === claudeSession) return { status: 'already_agent', ...out };
   writeProjectOptions(found.root, projectOptions(token, { root: found.root, url, claudeSession, binding: found.binding }));
   return { status: 'claimed', previous_agent: found.options.claude_session_id, ...out,
-    hint: 'Reconnect the team-messaging MCP server in this session (/mcp, then Reconnect) or restart with claude --continue. The previous agent session stops within about 5 s.' };
+    hint: 'The team-messaging tools load in this session within a few seconds. If they do not appear, reconnect the team-messaging MCP server (/mcp, then team-messaging, then Reconnect) or restart with claude --continue; after /clear a reconnect is always needed. The previous agent session stops within about 5 s.' };
 }
 // Plugin status: the credential comes from TM_* (the skill passes the saved
 // options inline) and the binding from the project file. Only fixed states,

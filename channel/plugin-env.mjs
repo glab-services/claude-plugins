@@ -40,7 +40,7 @@ const hints = {
   TOKEN_FILE_MISMATCH: 'The saved token file is not the credential join saved for the saved broker URL; run /team-messaging:join or /team-messaging:bind again.',
   INVALID_HOOK_ARGS: 'Reinstall the plugin: its hooks pass only --project-dir and --data-dir.',
   SESSION_ID_UNKNOWN: 'Claude Code did not pass a valid session id, so this process stays inert.',
-  NOT_AGENT_SESSION: 'This Claude session is not the agent session of this project; run /team-messaging:claim here to take over, then reconnect the MCP server.',
+  NOT_AGENT_SESSION: 'This Claude session is not the agent session of this project; run /team-messaging:claim here; the tools load within a few seconds, reconnect if they do not.',
   PROJECT_NOT_BOUND: 'This project has no team-messaging binding; run /team-messaging:bind or /team-messaging:join in the session that should be the agent.',
   PLUGIN_NOT_CONFIGURED: 'The plugin has no saved credential; run /team-messaging:join or /team-messaging:bind in the agent session.',
   INVALID_ARM: 'Set the plugin option arm to rewake, bash or off.',
@@ -134,8 +134,9 @@ export function resolveBinding({ options = {}, claudeSession, projectDir, env = 
 // another binding, or a file that parses fails its MAC. An absent,
 // unparsable or partly written file (a writer mid-rename, an editor's
 // save) only means "check again": two such reads at least CONFIRM_MS apart,
-// with no good read between them, demote. Demotion is final: promotion never
-// happens in place, only through a new process.
+// with no good read between them, demote. Demotion is final. Promotion
+// happens once, in place, in the inert server (plugin-main.mjs, 0.11.1 D6),
+// which then runs this check like any active server.
 const CONFIRM_MS = 4000;
 export function agentCheck(resolved, { projectDir, env = process.env, now = Date.now } = {}) {
   let known = resolved.identity, mac = resolved.mac, current = true, firstBad = null;
